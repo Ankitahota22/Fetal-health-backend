@@ -43,6 +43,13 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
+def require_role(*allowed_roles: str):
+    def checker(current_user: models.User = Depends(get_current_user)):
+        if current_user.role not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Not enough permissions")
+        return current_user
+    return checker
+
 
 class UserRegister(BaseModel):
     name: str
@@ -121,3 +128,15 @@ def read_me(current_user: models.User = Depends(get_current_user)):
         "email": current_user.email,
         "role": current_user.role,
     }
+
+
+@app.get("/admin/users")
+def list_users(
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    users = db.query(models.User).all()
+    return [
+        {"id": u.id, "name": u.name, "email": u.email, "role": u.role}
+        for u in users
+    ]
