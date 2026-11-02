@@ -1,7 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import bcrypt
+import jwt
+from datetime import datetime, timedelta, timezone
 
 from database import engine, SessionLocal
 import models
@@ -10,18 +13,43 @@ app = FastAPI()
 
 models.Base.metadata.create_all(bind=engine)
 
+SECRET_KEY = "change-this-to-a-long-random-secret"
+ALGORITHM = "HS256"
+TOKEN_EXPIRE_MINUTES = 30
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
+    
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
 
 class UserRegister(BaseModel):
     name: str
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
     email: str
     password: str
 
@@ -63,4 +91,33 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
         "name": new_user.name,
         "email": new_user.email,
         "role": new_user.role,
+    }
+
+@app.post("/login")
+def login(
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    db_user = db.query(models.User).filter(models.User.email == form.username).first()
+
+    if not db_user or not bcrypt.checkpw(
+        form.password.encode("utf-8"), db_user.password_hash.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    expire = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
+    token = jwt.encode(
+        {"sub": db_user.email, "role": db_user.role, "exp": expire},
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.get("/me")
+def read_me(current_user: models.User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "role": current_user.role,
     }
