@@ -1,3 +1,8 @@
+import io
+import hashlib
+import uuid
+from pathlib import Path
+from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -8,8 +13,6 @@ from datetime import datetime, timedelta, timezone
 
 from database import engine, SessionLocal
 import models
-import uuid
-from pathlib import Path
 
 app = FastAPI()
 
@@ -22,6 +25,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 UPLOAD_DIR = Path(__file__).parent / "uploads_data"
 UPLOAD_DIR.mkdir(exist_ok=True)
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_FORMATS = {"JPEG": "jpg", "PNG": "png"}
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
@@ -195,20 +200,47 @@ def upload_image(
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    # 2. File ka data padho
-    data = file.file.read()
+    # 2. File padho (size limit ke saath)
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) == 0:
         raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
 
-    # 3. Random naam se save karo
-    stored_name = f"{uuid.uuid4().hex}.img"
-    (UPLOAD_DIR / stored_name).write_bytes(data)
+    # 3. Pillow se check: kya yeh sach mein image hai?
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.verify()  # corrupt file pakadta hai
+        img = Image.open(io.BytesIO(data))  # verify ke baad dobara kholna padta hai
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid or corrupt image")
 
-    # 4. Database mein record banao
+    # 4. Sirf JPEG / PNG
+    fmt = img.format
+    if fmt not in ALLOWED_FORMATS:
+        raise HTTPException(
+            status_code=415, detail="Only JPEG and PNG images are allowed"
+        )
+
+    # 5. Metadata hatao: sirf pixels ko naye image mein copy karo
+    clean = Image.new(img.mode, img.size)
+    clean.putdata(list(img.getdata()))
+    buffer = io.BytesIO()
+    clean.save(buffer, format=fmt)
+    clean_bytes = buffer.getvalue()
+
+    # 6. Hash, random naam, save
+    sha256 = hashlib.sha256(clean_bytes).hexdigest()
+    stored_name = f"{uuid.uuid4().hex}.{ALLOWED_FORMATS[fmt]}"
+    (UPLOAD_DIR / stored_name).write_bytes(clean_bytes)
+
+    # 7. Database record
     asset = models.ImageAsset(
         assessment_id=assessment.id,
         stored_name=stored_name,
-        size_bytes=len(data),
+        size_bytes=len(clean_bytes),
+        content_type=f"image/{ALLOWED_FORMATS[fmt]}".replace("jpg", "jpeg"),
+        sha256=sha256,
     )
     db.add(asset)
     db.commit()
@@ -218,4 +250,6 @@ def upload_image(
         "id": asset.id,
         "assessment_id": asset.assessment_id,
         "size_bytes": asset.size_bytes,
+        "content_type": asset.content_type,
+        "sha256": asset.sha256,
     }
