@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 from database import engine, SessionLocal
 import models
+import uuid
+from pathlib import Path
 
 app = FastAPI()
 
@@ -18,6 +20,8 @@ ALGORITHM = "HS256"
 TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+UPLOAD_DIR = Path(__file__).parent / "uploads_data"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
@@ -171,3 +175,47 @@ def my_assessments(
         {"id": a.id, "status": a.status, "created_at": a.created_at}
         for a in items
     ]
+
+@app.post("/assessments/{assessment_id}/image", status_code=201)
+def upload_image(
+    assessment_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 1. Assessment hai aur isi user ka hai?
+    assessment = (
+        db.query(models.Assessment)
+        .filter(
+            models.Assessment.id == assessment_id,
+            models.Assessment.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    # 2. File ka data padho
+    data = file.file.read()
+    if len(data) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # 3. Random naam se save karo
+    stored_name = f"{uuid.uuid4().hex}.img"
+    (UPLOAD_DIR / stored_name).write_bytes(data)
+
+    # 4. Database mein record banao
+    asset = models.ImageAsset(
+        assessment_id=assessment.id,
+        stored_name=stored_name,
+        size_bytes=len(data),
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+
+    return {
+        "id": asset.id,
+        "assessment_id": asset.assessment_id,
+        "size_bytes": asset.size_bytes,
+    }

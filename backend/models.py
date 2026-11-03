@@ -23,3 +23,14 @@ class Assessment(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     owner = relationship("User")
+
+class ImageAsset(Base):
+    __tablename__ = "image_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
+    stored_name = Column(String, nullable=False)   # random naam jisse file save hui
+    size_bytes = Column(Integer, nullable=False)
+    content_type = Column(String, nullable=True)   # baad mein bharenge
+    sha256 = Column(String, nullable=True)         # baad mein bharenge
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
