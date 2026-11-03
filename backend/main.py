@@ -140,3 +140,34 @@ def list_users(
         {"id": u.id, "name": u.name, "email": u.email, "role": u.role}
         for u in users
     ]
+
+@app.post("/assessments", status_code=201)
+def create_assessment(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    assessment = models.Assessment(user_id=current_user.id)
+    db.add(assessment)
+    db.commit()
+    db.refresh(assessment)
+    return {
+        "id": assessment.id,
+        "status": assessment.status,
+        "created_at": assessment.created_at,
+    }
+
+
+@app.get("/assessments")
+def my_assessments(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    items = (
+        db.query(models.Assessment)
+        .filter(models.Assessment.user_id == current_user.id)
+        .all()
+    )
+    return [
+        {"id": a.id, "status": a.status, "created_at": a.created_at}
+        for a in items
+    ]
