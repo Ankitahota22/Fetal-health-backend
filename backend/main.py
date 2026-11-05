@@ -1,3 +1,4 @@
+from fastapi.responses import FileResponse
 import io
 import hashlib
 import uuid
@@ -253,3 +254,35 @@ def upload_image(
         "content_type": asset.content_type,
         "sha256": asset.sha256,
     }
+
+@app.get("/images/{image_id}")
+def get_image(
+    image_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 1. Image record dhundho
+    asset = db.query(models.ImageAsset).filter(models.ImageAsset.id == image_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # 2. Permission check
+    if current_user.role not in ("doctor", "admin"):
+        assessment = (
+            db.query(models.Assessment)
+            .filter(
+                models.Assessment.id == asset.assessment_id,
+                models.Assessment.user_id == current_user.id,
+            )
+            .first()
+        )
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+    # 3. File disk par hai?
+    file_path = UPLOAD_DIR / asset.stored_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image file missing")
+
+    # 4. Image bhejo
+    return FileResponse(file_path, media_type=asset.content_type or "image/jpeg")
