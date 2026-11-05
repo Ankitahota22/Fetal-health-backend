@@ -44,3 +44,12 @@ class Prediction(Base):
     probabilities = Column(String, nullable=False)   # JSON text mein save hoga
     model_version = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class DoctorReview(Base):
+    __tablename__ = "doctor_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    prediction_id = Column(Integer, ForeignKey("predictions.id"), nullable=False)
+    doctor_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    comment = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

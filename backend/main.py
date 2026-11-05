@@ -355,3 +355,87 @@ def run_prediction(
         "model_version": prediction.model_version,
         "disclaimer": "Screening support only, not a diagnosis.",
     }
+
+class ReviewIn(BaseModel):
+    comment: str
+
+
+@app.get("/doctor/assessments")
+def doctor_list_assessments(
+    db: Session = Depends(get_db),
+    doctor: models.User = Depends(require_role("doctor", "admin")),
+):
+    items = db.query(models.Assessment).all()
+    return [
+        {
+            "id": a.id,
+            "patient_id": a.user_id,
+            "patient_name": a.owner.name,
+            "status": a.status,
+            "created_at": a.created_at,
+        }
+        for a in items
+    ]
+
+
+@app.get("/doctor/assessments/{assessment_id}")
+def doctor_assessment_detail(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    doctor: models.User = Depends(require_role("doctor", "admin")),
+):
+    a = db.query(models.Assessment).filter(models.Assessment.id == assessment_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    images = db.query(models.ImageAsset).filter(models.ImageAsset.assessment_id == a.id).all()
+    preds = db.query(models.Prediction).filter(models.Prediction.assessment_id == a.id).all()
+
+    result = []
+    for p in preds:
+        reviews = (
+            db.query(models.DoctorReview)
+            .filter(models.DoctorReview.prediction_id == p.id)
+            .all()
+        )
+        result.append(
+            {
+                "id": p.id,
+                "predicted_class": p.predicted_class,
+                "probabilities": json.loads(p.probabilities),
+                "model_version": p.model_version,
+                "reviews": [
+                    {"doctor_id": r.doctor_id, "comment": r.comment, "created_at": r.created_at}
+                    for r in reviews
+                ],
+            }
+        )
+
+    return {
+        "id": a.id,
+        "patient_name": a.owner.name,
+        "status": a.status,
+        "image_ids": [i.id for i in images],
+        "predictions": result,
+    }
+
+
+@app.post("/doctor/predictions/{prediction_id}/review", status_code=201)
+def add_review(
+    prediction_id: int,
+    body: ReviewIn,
+    db: Session = Depends(get_db),
+    doctor: models.User = Depends(require_role("doctor", "admin")),
+):
+    pred = db.query(models.Prediction).filter(models.Prediction.id == prediction_id).first()
+    if not pred:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+
+    review = models.DoctorReview(
+        prediction_id=pred.id, doctor_id=doctor.id, comment=body.comment
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+    return {"id": review.id, "prediction_id": review.prediction_id, "comment": review.comment}
+
