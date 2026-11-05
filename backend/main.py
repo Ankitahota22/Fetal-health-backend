@@ -1,3 +1,4 @@
+import json
 from fastapi.responses import FileResponse
 import io
 import hashlib
@@ -28,6 +29,21 @@ UPLOAD_DIR = Path(__file__).parent / "uploads_data"
 UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_FORMATS = {"JPEG": "jpg", "PNG": "png"}
+
+def mock_ai_predict(image_bytes: bytes) -> dict:
+    # Yeh nakli hai. Baad mein Member 3 ki real service se replace hoga.
+    return {
+        "predicted_class": "Brain",
+        "probabilities": {
+            "Brain": 0.82,
+            "Abdomen": 0.05,
+            "Femur": 0.03,
+            "Thorax": 0.04,
+            "Cervix": 0.02,
+            "Other": 0.04,
+        },
+        "model_version": "mock-v0",
+    }
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
@@ -286,3 +302,56 @@ def get_image(
 
     # 4. Image bhejo
     return FileResponse(file_path, media_type=asset.content_type or "image/jpeg")
+
+@app.post("/assessments/{assessment_id}/predict", status_code=201)
+def run_prediction(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 1. Assessment isi user ki hai?
+    assessment = (
+        db.query(models.Assessment)
+        .filter(
+            models.Assessment.id == assessment_id,
+            models.Assessment.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    # 2. Is assessment ki image hai?
+    asset = (
+        db.query(models.ImageAsset)
+        .filter(models.ImageAsset.assessment_id == assessment.id)
+        .order_by(models.ImageAsset.id.desc())
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=400, detail="Upload an image first")
+
+    # 3. Image padho aur AI ko bhejo (abhi mock)
+    image_bytes = (UPLOAD_DIR / asset.stored_name).read_bytes()
+    result = mock_ai_predict(image_bytes)
+
+    # 4. Result save karo
+    prediction = models.Prediction(
+        assessment_id=assessment.id,
+        predicted_class=result["predicted_class"],
+        probabilities=json.dumps(result["probabilities"]),
+        model_version=result["model_version"],
+    )
+    db.add(prediction)
+    assessment.status = "completed"
+    db.commit()
+    db.refresh(prediction)
+
+    return {
+        "id": prediction.id,
+        "assessment_id": prediction.assessment_id,
+        "predicted_class": prediction.predicted_class,
+        "probabilities": result["probabilities"],
+        "model_version": prediction.model_version,
+        "disclaimer": "Screening support only, not a diagnosis.",
+    }

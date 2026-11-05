@@ -34,3 +34,13 @@ class ImageAsset(Base):
     content_type = Column(String, nullable=True)   # baad mein bharenge
     sha256 = Column(String, nullable=True)         # baad mein bharenge
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class Prediction(Base):
+    __tablename__ = "predictions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
+    predicted_class = Column(String, nullable=False)
+    probabilities = Column(String, nullable=False)   # JSON text mein save hoga
+    model_version = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
