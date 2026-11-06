@@ -1,3 +1,4 @@
+import time
 import httpx
 import json
 from fastapi.responses import FileResponse
@@ -49,14 +50,30 @@ def mock_ai_predict(image_bytes: bytes) -> dict:
 AI_SERVICE_URL = "http://127.0.0.1:8001"
 
 
+MAX_RETRIES = 3
+
+
 def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dict:
-    response = httpx.post(
-        f"{AI_SERVICE_URL}/predict",
-        files={"file": (filename, image_bytes, content_type)},
-        timeout=10.0,
-    )
-    response.raise_for_status()
-    return response.json()
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = httpx.post(
+                f"{AI_SERVICE_URL}/predict",
+                files={"file": (filename, image_bytes, content_type)},
+                timeout=10.0,
+            )
+            # 4xx = hamari galti (galat image), retry ka fayda nahi
+            if 400 <= response.status_code < 500:
+                raise HTTPException(
+                    status_code=400, detail="AI service rejected the image"
+                )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                time.sleep(attempt)  # 1 sec, phir 2 sec rukna
+    raise last_error
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
