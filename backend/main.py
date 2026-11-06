@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 import time
 import httpx
 import json
@@ -22,7 +24,11 @@ app = FastAPI()
 
 models.Base.metadata.create_all(bind=engine)
 
-SECRET_KEY = "change-this-to-a-long-random-secret"
+load_dotenv(Path(__file__).parent / ".env")
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY missing in .env file")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -32,22 +38,8 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_FORMATS = {"JPEG": "jpg", "PNG": "png"}
 
-def mock_ai_predict(image_bytes: bytes) -> dict:
-    # Yeh nakli hai. Baad mein Member 3 ki real service se replace hoga.
-    return {
-        "predicted_class": "Brain",
-        "probabilities": {
-            "Brain": 0.82,
-            "Abdomen": 0.05,
-            "Femur": 0.03,
-            "Thorax": 0.04,
-            "Cervix": 0.02,
-            "Other": 0.04,
-        },
-        "model_version": "mock-v0",
-    }
 
-AI_SERVICE_URL = "http://127.0.0.1:8001"
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8001")
 
 
 MAX_RETRIES = 3
