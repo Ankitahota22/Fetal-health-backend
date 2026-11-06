@@ -1,3 +1,4 @@
+import httpx
 import json
 from fastapi.responses import FileResponse
 import io
@@ -44,6 +45,18 @@ def mock_ai_predict(image_bytes: bytes) -> dict:
         },
         "model_version": "mock-v0",
     }
+
+AI_SERVICE_URL = "http://127.0.0.1:8001"
+
+
+def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dict:
+    response = httpx.post(
+        f"{AI_SERVICE_URL}/predict",
+        files={"file": (filename, image_bytes, content_type)},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    return response.json()
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
@@ -333,7 +346,12 @@ def run_prediction(
 
     # 3. Image padho aur AI ko bhejo (abhi mock)
     image_bytes = (UPLOAD_DIR / asset.stored_name).read_bytes()
-    result = mock_ai_predict(image_bytes)
+    try:
+        result = call_ai_service(
+            image_bytes, asset.stored_name, asset.content_type or "image/jpeg"
+        )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="AI service unavailable")
 
     # 4. Result save karo
     prediction = models.Prediction(
