@@ -2,7 +2,7 @@
 
 Project: Hybrid QML Platform for Fetal Health
 Owner: Member 4 (Backend). Reader: Member 5 (Frontend).
-Version: 1.0 (draft)
+Version: 1.1 (draft). Added patient history endpoints.
 
 Base URL (local): `http://127.0.0.1:8000`
 Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
@@ -48,7 +48,8 @@ Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
 | POST | `/login` | Anyone | Get an access token |
 | GET | `/me` | Any logged-in user | Who am I? |
 | POST | `/assessments` | Logged-in user | Start a new screening |
-| GET | `/assessments` | Logged-in user | My screenings (own only) |
+| GET | `/assessments` | Logged-in user | My screenings (own only), with latest result and image ids |
+| GET | `/assessments/{id}` | Owner of the assessment | One of my screenings in detail (all predictions, probabilities, doctor comments) |
 | POST | `/assessments/{id}/image` | Owner of the assessment | Upload an ultrasound image |
 | POST | `/assessments/{id}/predict` | Owner of the assessment | Run the AI on the latest image |
 | GET | `/images/{image_id}` | Owner, doctor, admin | Download an image |
@@ -110,11 +111,52 @@ No body. Response `201`:
 ```
 
 #### GET `/assessments`
-Only the logged-in user's own assessments. Response `200`:
+Only the logged-in user's own assessments. Use this for the history list. Response `200`:
 ```json
-[ { "id": 3, "status": "pending", "created_at": "2026-11-03T06:21:41.240998" } ]
+[
+  {
+    "id": 3,
+    "status": "completed",
+    "created_at": "2026-11-03T06:21:41.240998",
+    "predicted_class": "Brain",
+    "image_ids": [5]
+  },
+  {
+    "id": 4,
+    "status": "pending",
+    "created_at": "2026-11-04T09:10:00.000000",
+    "predicted_class": null,
+    "image_ids": []
+  }
+]
 ```
 `status` is `pending` until a prediction is run, then `completed`.
+`predicted_class` is the latest prediction, or `null` if none yet.
+`image_ids` is empty until an image is uploaded.
+
+#### GET `/assessments/{id}`
+One of the logged-in user's own assessments, in detail. Use this for the history detail screen. Response `200`:
+```json
+{
+  "id": 3,
+  "status": "completed",
+  "created_at": "2026-11-03T06:21:41.240998",
+  "image_ids": [5],
+  "predictions": [
+    {
+      "id": 7,
+      "predicted_class": "Brain",
+      "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
+      "model_version": "mock-service-v1",
+      "disclaimer": "Screening support only, not a diagnosis.",
+      "reviews": [ { "comment": "Plane looks correct.", "created_at": "2026-11-05T10:00:00" } ]
+    }
+  ]
+}
+```
+`reviews` holds the doctor comments (the doctor's id is not shown to patients).
+Errors: `404` not found, or belongs to another patient.
+Use each id in `image_ids` with `GET /images/{image_id}`.
 
 #### POST `/assessments/{id}/image`
 Request: `multipart/form-data` with one field named `file`.
@@ -220,8 +262,6 @@ Actions recorded: `login_success`, `login_failed`, `image_uploaded`, `image_view
 
 | Item | Status |
 |---|---|
-| Patient endpoint to see an old prediction result (history detail) | Not built yet. Today a patient sees the result only in the `predict` response |
-| `GET /assessments` returning predicted class and image ids | Not built yet |
 | Heatmap image (`heatmap_base64`) | Waiting for the real AI service (Member 3). The field is `null` in the mock |
 | Sign in with Google (Firebase) | Parked, pending answers from Member 5 |
 | Expiring image links | Planned |
