@@ -15,7 +15,7 @@ from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 import bcrypt
 import jwt
@@ -112,9 +112,9 @@ def require_role(*allowed_roles: str):
 
 
 class UserRegister(BaseModel):
-    name: str
-    email: str
-    password: str
+    name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
 
 class UserLogin(BaseModel):
     email: str
