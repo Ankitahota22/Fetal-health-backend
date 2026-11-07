@@ -53,3 +53,12 @@ class DoctorReview(Base):
     doctor_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     comment = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=True)      # login fail ho to user pata nahi hota
+    action = Column(String, nullable=False)       # jaise "login_success"
+    detail = Column(String, nullable=True)        # extra info (id, email)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

@@ -91,6 +91,10 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
+def log_action(db: Session, action: str, user_id: int = None, detail: str = None):
+    db.add(models.AuditLog(user_id=user_id, action=action, detail=detail))
+    db.commit()
+
 def require_role(*allowed_roles: str):
     def checker(current_user: models.User = Depends(get_current_user)):
         if current_user.role not in allowed_roles:
@@ -158,7 +162,10 @@ def login(
     if not db_user or not bcrypt.checkpw(
         form.password.encode("utf-8"), db_user.password_hash.encode("utf-8")
     ):
+        log_action(db, "login_failed", detail=form.username)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    log_action(db, "login_success", user_id=db_user.id)
 
     expire = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
     token = jwt.encode(
@@ -285,6 +292,8 @@ def upload_image(
     db.commit()
     db.refresh(asset)
 
+    log_action(db, "image_uploaded", user_id=current_user.id, detail=f"image_id={asset.id}")
+
     return {
         "id": asset.id,
         "assessment_id": asset.assessment_id,
@@ -323,6 +332,7 @@ def get_image(
         raise HTTPException(status_code=404, detail="Image file missing")
 
     # 4. Image bhejo
+    log_action(db, "image_viewed", user_id=current_user.id, detail=f"image_id={asset.id}")
     return FileResponse(file_path, media_type=asset.content_type or "image/jpeg")
 
 @app.post("/assessments/{assessment_id}/predict", status_code=201)
@@ -353,7 +363,7 @@ def run_prediction(
     if not asset:
         raise HTTPException(status_code=400, detail="Upload an image first")
 
-    # 3. Image padho aur AI ko bhejo (abhi mock)
+    # 3. Image padho aur AI service ko bhejo
     image_bytes = (UPLOAD_DIR / asset.stored_name).read_bytes()
     try:
         result = call_ai_service(
@@ -373,6 +383,8 @@ def run_prediction(
     assessment.status = "completed"
     db.commit()
     db.refresh(prediction)
+
+    log_action(db, "prediction_run", user_id=current_user.id, detail=f"prediction_id={prediction.id}")
 
     return {
         "id": prediction.id,
@@ -464,5 +476,27 @@ def add_review(
     db.add(review)
     db.commit()
     db.refresh(review)
+    log_action(db, "review_added", user_id=doctor.id, detail=f"review_id={review.id}")
     return {"id": review.id, "prediction_id": review.prediction_id, "comment": review.comment}
 
+@app.get("/admin/audit-logs")
+def list_audit_logs(
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    logs = (
+        db.query(models.AuditLog)
+        .order_by(models.AuditLog.id.desc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            "id": l.id,
+            "user_id": l.user_id,
+            "action": l.action,
+            "detail": l.detail,
+            "created_at": l.created_at,
+        }
+        for l in logs
+    ]
