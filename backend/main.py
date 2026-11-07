@@ -67,6 +67,7 @@ AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8001")
 
 
 MAX_RETRIES = 3
+IMAGE_LINK_EXPIRE_MINUTES = 5
 
 
 def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dict:
@@ -586,3 +587,71 @@ def my_assessment_detail(
         "image_ids": [i.id for i in images],
         "predictions": result,
     }
+
+@app.post("/images/{image_id}/link")
+def create_image_link(
+    image_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.ImageAsset).filter(models.ImageAsset.id == image_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Patient sirf apni image ka link bana sakta hai
+    if current_user.role not in ("doctor", "admin"):
+        assessment = (
+            db.query(models.Assessment)
+            .filter(
+                models.Assessment.id == asset.assessment_id,
+                models.Assessment.user_id == current_user.id,
+            )
+            .first()
+        )
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+    expire = datetime.now(timezone.utc) + timedelta(minutes=IMAGE_LINK_EXPIRE_MINUTES)
+    token = jwt.encode(
+        {"type": "image_link", "image_id": asset.id, "uid": current_user.id, "exp": expire},
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
+    log_action(db, "image_link_created", user_id=current_user.id, detail=f"image_id={asset.id}")
+    return {
+        "url": f"/image-links/{token}",
+        "expires_in_seconds": IMAGE_LINK_EXPIRE_MINUTES * 60,
+    }
+
+
+@app.get("/image-links/{token}")
+def get_image_by_link(token: str, db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Link expired or invalid")
+
+    # Login token se image link nahi khulna chahiye
+    if payload.get("type") != "image_link":
+        raise HTTPException(status_code=401, detail="Link expired or invalid")
+
+    asset = (
+        db.query(models.ImageAsset)
+        .filter(models.ImageAsset.id == payload.get("image_id"))
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    file_path = UPLOAD_DIR / asset.stored_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image file missing")
+
+    log_action(
+        db, "image_viewed_via_link", user_id=payload.get("uid"), detail=f"image_id={asset.id}"
+    )
+    return FileResponse(
+        file_path,
+        media_type=asset.content_type or "image/jpeg",
+        headers={"Cache-Control": "private, no-store"},
+    )
