@@ -1,3 +1,7 @@
+from fastapi import Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import os
 from dotenv import load_dotenv
 import time
@@ -21,6 +25,10 @@ from database import engine, SessionLocal
 import models
 
 app = FastAPI()
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -124,7 +132,8 @@ def health():
 
 
 @app.post("/register", status_code=201)
-def register(user: UserRegister, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def register(request: Request, user: UserRegister, db: Session = Depends(get_db)):
     # 1. Check karo ki email pehle se to nahi hai
     existing = db.query(models.User).filter(models.User.email == user.email).first()
     if existing:
@@ -152,8 +161,11 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
         "role": new_user.role,
     }
 
+
 @app.post("/login")
+@limiter.limit("5/minute")
 def login(
+    request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
@@ -174,15 +186,6 @@ def login(
         algorithm=ALGORITHM,
     )
     return {"access_token": token, "token_type": "bearer"}
-
-@app.get("/me")
-def read_me(current_user: models.User = Depends(get_current_user)):
-    return {
-        "id": current_user.id,
-        "name": current_user.name,
-        "email": current_user.email,
-        "role": current_user.role,
-    }
 
 
 @app.get("/admin/users")
