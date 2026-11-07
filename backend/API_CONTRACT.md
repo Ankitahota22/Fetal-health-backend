@@ -2,7 +2,7 @@
 
 Project: Hybrid QML Platform for Fetal Health
 Owner: Member 4 (Backend). Reader: Member 5 (Frontend).
-Version: 1.1 (draft). Added patient history endpoints.
+Version: 1.2 (draft). Added patient history, expiring image links, admin activate/deactivate.
 
 Base URL (local): `http://127.0.0.1:8000`
 Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
@@ -29,7 +29,7 @@ Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
 | 200 / 201 | OK / created |
 | 400 | Bad request (empty file, corrupt image, email already registered, no image uploaded yet) |
 | 401 | Not logged in, wrong password, or token expired |
-| 403 | Logged in, but role is not allowed |
+| 403 | Logged in, but role is not allowed (or the account is deactivated, at login) |
 | 404 | Not found, or belongs to another patient (the backend does not reveal which) |
 | 413 | Image larger than 10 MB |
 | 415 | Image is not JPEG or PNG |
@@ -52,11 +52,14 @@ Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
 | GET | `/assessments/{id}` | Owner of the assessment | One of my screenings in detail (all predictions, probabilities, doctor comments) |
 | POST | `/assessments/{id}/image` | Owner of the assessment | Upload an ultrasound image |
 | POST | `/assessments/{id}/predict` | Owner of the assessment | Run the AI on the latest image |
-| GET | `/images/{image_id}` | Owner, doctor, admin | Download an image |
+| GET | `/images/{image_id}` | Owner, doctor, admin | Download an image (needs the Authorization header) |
+| POST | `/images/{image_id}/link` | Owner, doctor, admin | Get a temporary image link (5 minutes) |
+| GET | `/image-links/{token}` | Anyone with the link | Open the image from a temporary link (no header needed) |
 | GET | `/doctor/assessments` | Doctor, admin | All patients' screenings |
 | GET | `/doctor/assessments/{id}` | Doctor, admin | One screening in detail |
 | POST | `/doctor/predictions/{prediction_id}/review` | Doctor, admin | Add a review comment |
 | GET | `/admin/users` | Admin | List all users |
+| PUT | `/admin/users/{user_id}/active` | Admin | Activate or deactivate a user |
 | GET | `/admin/audit-logs` | Admin | Latest 100 audit entries |
 
 ---
@@ -91,7 +94,7 @@ Response `200`:
 ```json
 { "access_token": "<long token>", "token_type": "bearer" }
 ```
-Errors: `401` invalid email or password, `429` too many attempts.
+Errors: `401` invalid email or password, `403` account is deactivated, `429` too many attempts.
 
 #### GET `/me`  (auth)
 Response `200`:
@@ -199,7 +202,20 @@ Show the `disclaimer` and `model_version` in the UI.
 Returns the image file (`image/jpeg` or `image/png`).
 A patient can only get their own images. Doctor and admin can get any. Others get `404`.
 
-**Note for frontend:** this endpoint needs the `Authorization` header, so a plain `<img src="...">` will not work. Fetch the image with the header, turn the response into a Blob, and use `URL.createObjectURL(blob)` as the image source.
+**Note for frontend:** a plain `<img src="/images/5">` will not work here because this endpoint needs the `Authorization` header. Use the temporary link endpoint below instead (simplest), or fetch with the header and use `URL.createObjectURL(blob)`.
+
+#### POST `/images/{image_id}/link`  (auth)
+Creates a temporary link for one image. The same permission rules apply (a patient can only create links for their own images).
+
+Response `200`:
+```json
+{ "url": "/image-links/eyJhbGciOi...", "expires_in_seconds": 300 }
+```
+Errors: `404` image not found (or not yours).
+
+#### GET `/image-links/{token}`  (no auth header needed)
+Open `BASE_URL + url` directly in `<img src>`. Works for 5 minutes, then returns `401 Link expired or invalid`. Ask for a new link when it expires.
+Anyone who has the link can open the image until it expires, so do not share or store these links.
 
 ---
 
@@ -246,15 +262,27 @@ Response `201`:
 
 #### GET `/admin/users`
 ```json
-[ { "id": 1, "name": "Riya", "email": "riya@gmail.com", "role": "admin" } ]
+[ { "id": 1, "name": "Riya", "email": "riya@gmail.com", "role": "admin", "is_active": true } ]
 ```
+
+#### PUT `/admin/users/{user_id}/active`
+Request:
+```json
+{ "is_active": false }
+```
+Response `200`:
+```json
+{ "id": 3, "email": "sara@gmail.com", "is_active": false }
+```
+A deactivated user cannot log in, and their existing token stops working immediately.
+Errors: `400` admin tried to change their own status, `404` user not found, `403` not an admin.
 
 #### GET `/admin/audit-logs`
 Latest 100 entries, newest first.
 ```json
 [ { "id": 3, "user_id": 1, "action": "login_success", "detail": null, "created_at": "2026-11-06T18:42:16.480658" } ]
 ```
-Actions recorded: `login_success`, `login_failed`, `image_uploaded`, `image_viewed`, `prediction_run`, `review_added`.
+Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `image_uploaded`, `image_viewed`, `image_link_created`, `image_viewed_via_link`, `prediction_run`, `review_added`, `user_activated`, `user_deactivated`.
 
 ---
 
@@ -264,7 +292,6 @@ Actions recorded: `login_success`, `login_failed`, `image_uploaded`, `image_view
 |---|---|
 | Heatmap image (`heatmap_base64`) | Waiting for the real AI service (Member 3). The field is `null` in the mock |
 | Sign in with Google (Firebase) | Parked, pending answers from Member 5 |
-| Expiring image links | Planned |
-| Password change, forgot password, deactivate user | Not planned yet |
+| Password change, forgot password | Not planned yet |
 
 Any change to this contract will be announced before it is made.

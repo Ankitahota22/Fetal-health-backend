@@ -31,6 +31,9 @@ The application is a screening-support tool, not a diagnostic device. Only publi
 | 18 | AI service calls | Timeout (10 seconds), up to 3 retries for network or server errors, clear 503 when unavailable | Avoids hanging requests and confusing errors |
 | 19 | Database access | All queries use SQLAlchemy ORM (parameterised) | Protects against SQL injection |
 | 20 | Safe wording | Prediction responses include a disclaimer: screening support, not a diagnosis | Prevents misuse of results |
+| 21 | Expiring image links | A permission-checked, signed link valid for 5 minutes lets the frontend show an image without exposing the login token. Login tokens cannot be used as image links, and the response is marked no-store | Time-limited access to patient images |
+| 22 | Account deactivation | An admin can deactivate a user. The user cannot log in and the existing token stops working at once. An admin cannot deactivate themselves. Changes are audit-logged | Removes access quickly when needed |
+| 23 | Schema migrations | Alembic migration scripts track database changes without losing data | Safe, repeatable database updates |
 
 ---
 
@@ -40,7 +43,7 @@ We list these openly so the team and evaluators know the real state.
 
 | # | Item | Status / plan |
 |---|---|---|
-| 1 | Expiring image links | Not implemented. Access currently needs a valid token on every request |
+| 1 | Image link sharing | Links expire after 5 minutes but are not single-use or tied to one device. Anyone holding a valid link can open the image until it expires |
 | 2 | HTTPS | Not configured in local development. Must be enabled by the reverse proxy at deployment |
 | 3 | Encryption at rest (database fields and image files) | Not implemented. Plan: encrypted disk or object storage with encryption at deployment |
 | 4 | Database | SQLite for development. PostgreSQL planned for deployment, with Alembic migrations |
