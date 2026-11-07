@@ -112,8 +112,8 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found or deactivated")
     return user
 
 def log_action(db: Session, action: str, user_id: int = None, detail: str = None):
@@ -194,7 +194,12 @@ def login(
         log_action(db, "login_failed", detail=form.username)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    if not db_user.is_active:
+        log_action(db, "login_blocked_inactive", user_id=db_user.id)
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
     log_action(db, "login_success", user_id=db_user.id)
+    
 
     expire = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
     token = jwt.encode(
@@ -212,7 +217,7 @@ def list_users(
 ):
     users = db.query(models.User).all()
     return [
-        {"id": u.id, "name": u.name, "email": u.email, "role": u.role}
+        {"id": u.id, "name": u.name, "email": u.email, "role": u.role, "is_active": u.is_active}
         for u in users
     ]
 
@@ -655,3 +660,31 @@ def get_image_by_link(token: str, db: Session = Depends(get_db)):
         media_type=asset.content_type or "image/jpeg",
         headers={"Cache-Control": "private, no-store"},
     )
+
+class ActiveIn(BaseModel):
+    is_active: bool
+
+
+@app.put("/admin/users/{user_id}/active")
+def set_user_active(
+    user_id: int,
+    body: ActiveIn,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot change your own status")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_active = body.is_active
+    db.commit()
+    log_action(
+        db,
+        "user_activated" if body.is_active else "user_deactivated",
+        user_id=admin.id,
+        detail=f"target_user_id={user.id}",
+    )
+    return {"id": user.id, "email": user.email, "is_active": user.is_active}
