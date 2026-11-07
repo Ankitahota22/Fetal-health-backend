@@ -688,3 +688,12 @@ def set_user_active(
         detail=f"target_user_id={user.id}",
     )
     return {"id": user.id, "email": user.email, "is_active": user.is_active}
+
+@app.get("/me")
+def read_me(current_user: models.User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "role": current_user.role,
+    }

@@ -1,0 +1,247 @@
+import httpx
+
+import main
+
+
+# ---------- Basics + Register / Login ----------
+
+def test_health(client):
+    assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_register_ok_and_hides_password(client):
+    r = client.post(
+        "/register",
+        json={"name": "Riya", "email": "riya@gmail.com", "password": "password123"},
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["role"] == "patient"
+    assert "password" not in body and "password_hash" not in body
+
+
+def test_register_duplicate_email(client, make_user):
+    make_user("riya@gmail.com")
+    r = client.post(
+        "/register",
+        json={"name": "Riya", "email": "riya@gmail.com", "password": "password123"},
+    )
+    assert r.status_code == 400
+
+
+def test_register_validation(client):
+    bad_email = {"name": "A", "email": "abc", "password": "password123"}
+    short_pw = {"name": "A", "email": "a@gmail.com", "password": "123"}
+    empty_name = {"name": "", "email": "a@gmail.com", "password": "password123"}
+    for body in (bad_email, short_pw, empty_name):
+        assert client.post("/register", json=body).status_code == 422
+
+
+def test_login_wrong_password(client, make_user):
+    make_user("riya@gmail.com")
+    r = client.post("/login", data={"username": "riya@gmail.com", "password": "wrongwrong"})
+    assert r.status_code == 401
+
+
+def test_login_rate_limit(client):
+    main.limiter.reset()
+    main.limiter.enabled = True
+    try:
+        codes = [
+            client.post(
+                "/login", data={"username": "x@gmail.com", "password": "wrongwrong"}
+            ).status_code
+            for _ in range(6)
+        ]
+    finally:
+        main.limiter.enabled = False
+        main.limiter.reset()
+    assert codes[:5] == [401] * 5
+    assert codes[5] == 429
+
+
+def test_me_requires_token(client, make_user):
+    assert client.get("/me").status_code == 401
+    headers = make_user("riya@gmail.com")
+    r = client.get("/me", headers=headers)
+    assert r.status_code == 200 and r.json()["email"] == "riya@gmail.com"
+
+
+# ---------- RBAC ----------
+
+def test_admin_users_only_for_admin(client, make_user):
+    patient = make_user("aman@gmail.com")
+    admin = make_user("riya@gmail.com", role="admin")
+    assert client.get("/admin/users", headers=patient).status_code == 403
+    assert client.get("/admin/users", headers=admin).status_code == 200
+
+
+# ---------- Assessments: har user ka data alag ----------
+
+def test_assessments_are_isolated(client, make_user):
+    a = make_user("aman@gmail.com")
+    b = make_user("sara@gmail.com")
+    aid = client.post("/assessments", headers=a).json()["id"]
+    assert len(client.get("/assessments", headers=a).json()) == 1
+    assert client.get("/assessments", headers=b).json() == []
+    assert client.get(f"/assessments/{aid}", headers=b).status_code == 404
+    assert client.get(f"/assessments/{aid}", headers=a).status_code == 200
+
+
+# ---------- Image upload ----------
+
+def test_upload_valid_image(patient_with_image):
+    assert patient_with_image["image_id"] > 0
+
+
+def test_upload_rejects_bad_files(client, make_user, jpeg_bytes, gif_bytes):
+    h = make_user("aman@gmail.com")
+    aid = client.post("/assessments", headers=h).json()["id"]
+    url = f"/assessments/{aid}/image"
+
+    fake = client.post(url, files={"file": ("fake.jpg", b"just text", "image/jpeg")}, headers=h)
+    assert fake.status_code == 400
+
+    gif = client.post(url, files={"file": ("a.gif", gif_bytes, "image/gif")}, headers=h)
+    assert gif.status_code == 415
+
+    empty = client.post(url, files={"file": ("e.jpg", b"", "image/jpeg")}, headers=h)
+    assert empty.status_code == 400
+
+
+def test_upload_to_other_users_assessment(client, make_user, jpeg_bytes):
+    a = make_user("aman@gmail.com")
+    b = make_user("sara@gmail.com")
+    aid = client.post("/assessments", headers=a).json()["id"]
+    r = client.post(
+        f"/assessments/{aid}/image",
+        files={"file": ("s.jpg", jpeg_bytes, "image/jpeg")},
+        headers=b,
+    )
+    assert r.status_code == 404
+
+
+# ---------- Predict ----------
+
+def test_predict_needs_image(client, make_user):
+    h = make_user("aman@gmail.com")
+    aid = client.post("/assessments", headers=h).json()["id"]
+    assert client.post(f"/assessments/{aid}/predict", headers=h).status_code == 400
+
+
+def test_predict_ok_completes_assessment(client, patient_with_image):
+    p = patient_with_image
+    r = client.post(f"/assessments/{p['assessment_id']}/predict", headers=p["headers"])
+    assert r.status_code == 201
+    assert r.json()["predicted_class"] == "Brain"
+    assert "disclaimer" in r.json()
+    mine = client.get("/assessments", headers=p["headers"]).json()
+    assert mine[0]["status"] == "completed"
+    assert mine[0]["predicted_class"] == "Brain"
+
+
+def test_predict_returns_503_when_ai_down(client, patient_with_image, monkeypatch):
+    def broken(*args, **kwargs):
+        raise httpx.ConnectError("AI service down")
+
+    monkeypatch.setattr(main, "call_ai_service", broken)
+    p = patient_with_image
+    r = client.post(f"/assessments/{p['assessment_id']}/predict", headers=p["headers"])
+    assert r.status_code == 503
+
+
+# ---------- Image access + expiring links ----------
+
+def test_image_access_rules(client, make_user, patient_with_image):
+    p = patient_with_image
+    other = make_user("sara@gmail.com")
+    doctor = make_user("dr@gmail.com", role="doctor")
+    url = f"/images/{p['image_id']}"
+    assert client.get(url).status_code == 401
+    assert client.get(url, headers=p["headers"]).status_code == 200
+    assert client.get(url, headers=other).status_code == 404
+    assert client.get(url, headers=doctor).status_code == 200
+
+
+def test_image_link_works_without_login_and_rejects_tampering(client, make_user, patient_with_image):
+    p = patient_with_image
+    r = client.post(f"/images/{p['image_id']}/link", headers=p["headers"])
+    assert r.status_code == 200
+    link = r.json()["url"]
+
+    assert client.get(link).status_code == 200  # bina login ke
+
+    i = len(link) - 10
+    changed = "A" if link[i] != "A" else "B"
+    tampered = link[:i] + changed + link[i + 1:]
+    assert client.get(tampered).status_code == 401
+
+    # login token ko image link ki tarah use nahi kar sakte
+    login_token = p["headers"]["Authorization"].split(" ")[1]
+    assert client.get(f"/image-links/{login_token}").status_code == 401
+
+    # dusra patient link nahi bana sakta
+    other = make_user("sara@gmail.com")
+    assert client.post(f"/images/{p['image_id']}/link", headers=other).status_code == 404
+
+
+# ---------- Doctor flow ----------
+
+def test_doctor_review_flow(client, make_user, patient_with_image):
+    p = patient_with_image
+    aid = p["assessment_id"]
+    pred_id = client.post(f"/assessments/{aid}/predict", headers=p["headers"]).json()["id"]
+    doctor = make_user("dr@gmail.com", role="doctor")
+
+    assert client.get("/doctor/assessments", headers=p["headers"]).status_code == 403
+    assert client.get("/doctor/assessments", headers=doctor).status_code == 200
+
+    r = client.post(
+        f"/doctor/predictions/{pred_id}/review",
+        json={"comment": "Looks fine"},
+        headers=doctor,
+    )
+    assert r.status_code == 201
+
+    detail = client.get(f"/doctor/assessments/{aid}", headers=doctor).json()
+    assert detail["predictions"][0]["reviews"][0]["comment"] == "Looks fine"
+
+    mine = client.get(f"/assessments/{aid}", headers=p["headers"]).json()
+    review = mine["predictions"][0]["reviews"][0]
+    assert review["comment"] == "Looks fine"
+    assert "doctor_id" not in review  # patient ko doctor ka id nahi dikhta
+
+
+# ---------- Admin: deactivate + audit log ----------
+
+def test_admin_deactivates_and_reactivates_user(client, make_user):
+    admin = make_user("riya@gmail.com", role="admin")
+    user = make_user("sara@gmail.com")
+    uid = client.get("/me", headers=user).json()["id"]
+
+    r = client.put(f"/admin/users/{uid}/active", json={"is_active": False}, headers=admin)
+    assert r.status_code == 200 and r.json()["is_active"] is False
+
+    assert client.get("/me", headers=user).status_code == 401  # purana token bekaar
+    r = client.post("/login", data={"username": "sara@gmail.com", "password": "password123"})
+    assert r.status_code == 403
+
+    client.put(f"/admin/users/{uid}/active", json={"is_active": True}, headers=admin)
+    r = client.post("/login", data={"username": "sara@gmail.com", "password": "password123"})
+    assert r.status_code == 200
+
+
+def test_admin_cannot_deactivate_self(client, make_user):
+    admin = make_user("riya@gmail.com", role="admin")
+    my_id = client.get("/me", headers=admin).json()["id"]
+    r = client.put(f"/admin/users/{my_id}/active", json={"is_active": False}, headers=admin)
+    assert r.status_code == 400
+
+
+def test_audit_log_admin_only_and_records_login(client, make_user):
+    patient = make_user("aman@gmail.com")
+    admin = make_user("riya@gmail.com", role="admin")
+    assert client.get("/admin/audit-logs", headers=patient).status_code == 403
+    r = client.get("/admin/audit-logs", headers=admin)
+    assert r.status_code == 200
+    assert "login_success" in [row["action"] for row in r.json()]
