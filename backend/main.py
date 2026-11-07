@@ -241,10 +241,29 @@ def my_assessments(
         .filter(models.Assessment.user_id == current_user.id)
         .all()
     )
-    return [
-        {"id": a.id, "status": a.status, "created_at": a.created_at}
-        for a in items
-    ]
+    result = []
+    for a in items:
+        latest = (
+            db.query(models.Prediction)
+            .filter(models.Prediction.assessment_id == a.id)
+            .order_by(models.Prediction.id.desc())
+            .first()
+        )
+        images = (
+            db.query(models.ImageAsset)
+            .filter(models.ImageAsset.assessment_id == a.id)
+            .all()
+        )
+        result.append(
+            {
+                "id": a.id,
+                "status": a.status,
+                "created_at": a.created_at,
+                "predicted_class": latest.predicted_class if latest else None,
+                "image_ids": [i.id for i in images],
+            }
+        )
+    return result
 
 @app.post("/assessments/{assessment_id}/image", status_code=201)
 def upload_image(
@@ -519,3 +538,51 @@ def list_audit_logs(
         }
         for l in logs
     ]
+
+@app.get("/assessments/{assessment_id}")
+def my_assessment_detail(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    a = (
+        db.query(models.Assessment)
+        .filter(
+            models.Assessment.id == assessment_id,
+            models.Assessment.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not a:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    images = db.query(models.ImageAsset).filter(models.ImageAsset.assessment_id == a.id).all()
+    preds = db.query(models.Prediction).filter(models.Prediction.assessment_id == a.id).all()
+
+    result = []
+    for p in preds:
+        reviews = (
+            db.query(models.DoctorReview)
+            .filter(models.DoctorReview.prediction_id == p.id)
+            .all()
+        )
+        result.append(
+            {
+                "id": p.id,
+                "predicted_class": p.predicted_class,
+                "probabilities": json.loads(p.probabilities),
+                "model_version": p.model_version,
+                "disclaimer": "Screening support only, not a diagnosis.",
+                "reviews": [
+                    {"comment": r.comment, "created_at": r.created_at} for r in reviews
+                ],
+            }
+        )
+
+    return {
+        "id": a.id,
+        "status": a.status,
+        "created_at": a.created_at,
+        "image_ids": [i.id for i in images],
+        "predictions": result,
+    }
