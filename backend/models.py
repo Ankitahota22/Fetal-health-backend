@@ -13,8 +13,8 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, default="patient")
-
     is_active = Column(Boolean, default=True, nullable=False, server_default="1")
+
 
 class Assessment(Base):
     __tablename__ = "assessments"
@@ -26,6 +26,7 @@ class Assessment(Base):
 
     owner = relationship("User")
 
+
 class ImageAsset(Base):
     __tablename__ = "image_assets"
 
@@ -33,9 +34,10 @@ class ImageAsset(Base):
     assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
     stored_name = Column(String, nullable=False)   # random naam jisse file save hui
     size_bytes = Column(Integer, nullable=False)
-    content_type = Column(String, nullable=True)   # baad mein bharenge
-    sha256 = Column(String, nullable=True)         # baad mein bharenge
+    content_type = Column(String, nullable=True)
+    sha256 = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 
 class Prediction(Base):
     __tablename__ = "predictions"
@@ -43,9 +45,10 @@ class Prediction(Base):
     id = Column(Integer, primary_key=True, index=True)
     assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
     predicted_class = Column(String, nullable=False)
-    probabilities = Column(String, nullable=False)   # JSON text mein save hoga
+    probabilities = Column(String, nullable=False)   # JSON text mein save hota hai
     model_version = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 
 class DoctorReview(Base):
     __tablename__ = "doctor_reviews"
@@ -54,7 +57,9 @@ class DoctorReview(Base):
     prediction_id = Column(Integer, ForeignKey("predictions.id"), nullable=False)
     doctor_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     comment = Column(String, nullable=False)
+    agrees = Column(Boolean, default=True, nullable=False, server_default="1")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"

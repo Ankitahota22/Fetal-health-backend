@@ -33,6 +33,7 @@ The application is a screening-support tool, not a diagnostic device. Only publi
 | 20 | Safe wording | Prediction responses include a disclaimer: screening support, not a diagnosis | Prevents misuse of results |
 | 21 | Expiring image links | A permission-checked, signed link valid for 5 minutes lets the frontend show an image without exposing the login token. Login tokens cannot be used as image links, and the response is marked no-store | Time-limited access to patient images |
 | 22 | Account deactivation | An admin can deactivate a user. The user cannot log in and the existing token stops working at once. An admin cannot deactivate themselves. Changes are audit-logged | Removes access quickly when needed |
+| 24 | Admin user management | Only admins can create users or change roles. Admins cannot change their own role or status. Every change is audit-logged | Controlled privilege changes |
 | 23 | Schema migrations | Alembic migration scripts track database changes without losing data | Safe, repeatable database updates |
 
 ---

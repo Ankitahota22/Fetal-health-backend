@@ -2,7 +2,7 @@
 
 Project: Hybrid QML Platform for Fetal Health
 Owner: Member 4 (Backend). Reader: Member 5 (Frontend).
-Version: 1.2 (draft). Added patient history, expiring image links, admin activate/deactivate.
+Version: 1.3 (draft). Summary fields in lists, `created_at` in doctor detail, review `agrees`, admin create user and change role.
 
 Base URL (local): `http://127.0.0.1:8000`
 Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
@@ -59,6 +59,8 @@ Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
 | GET | `/doctor/assessments/{id}` | Doctor, admin | One screening in detail |
 | POST | `/doctor/predictions/{prediction_id}/review` | Doctor, admin | Add a review comment |
 | GET | `/admin/users` | Admin | List all users |
+| POST | `/admin/users` | Admin | Create a user with a chosen role |
+| PUT | `/admin/users/{user_id}/role` | Admin | Change a user's role |
 | PUT | `/admin/users/{user_id}/active` | Admin | Activate or deactivate a user |
 | GET | `/admin/audit-logs` | Admin | Latest 100 audit entries |
 
@@ -122,6 +124,8 @@ Only the logged-in user's own assessments. Use this for the history list. Respon
     "status": "completed",
     "created_at": "2026-11-03T06:21:41.240998",
     "predicted_class": "Brain",
+    "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
+    "model_version": "mock-service-v1",
     "image_ids": [5]
   },
   {
@@ -129,12 +133,14 @@ Only the logged-in user's own assessments. Use this for the history list. Respon
     "status": "pending",
     "created_at": "2026-11-04T09:10:00.000000",
     "predicted_class": null,
+    "probabilities": null,
+    "model_version": null,
     "image_ids": []
   }
 ]
 ```
 `status` is `pending` until a prediction is run, then `completed`.
-`predicted_class` is the latest prediction, or `null` if none yet.
+`predicted_class`, `probabilities` and `model_version` come from the latest prediction, or are `null` if there is none yet.
 `image_ids` is empty until an image is uploaded.
 
 #### GET `/assessments/{id}`
@@ -152,7 +158,7 @@ One of the logged-in user's own assessments, in detail. Use this for the history
       "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
       "model_version": "mock-service-v1",
       "disclaimer": "Screening support only, not a diagnosis.",
-      "reviews": [ { "comment": "Plane looks correct.", "created_at": "2026-11-05T10:00:00" } ]
+      "reviews": [ { "comment": "Plane looks correct.", "agrees": true, "created_at": "2026-11-05T10:00:00" } ]
     }
   ]
 }
@@ -223,7 +229,18 @@ Anyone who has the link can open the image until it expires, so do not share or 
 
 #### GET `/doctor/assessments`
 ```json
-[ { "id": 1, "patient_id": 2, "patient_name": "Aman", "status": "completed", "created_at": "2026-11-03T06:19:29.546498" } ]
+[
+  {
+    "id": 1,
+    "patient_id": 2,
+    "patient_name": "Aman",
+    "status": "completed",
+    "created_at": "2026-11-03T06:19:29.546498",
+    "predicted_class": "Brain",
+    "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
+    "model_version": "mock-service-v1"
+  }
+]
 ```
 
 #### GET `/doctor/assessments/{id}`
@@ -232,6 +249,7 @@ Anyone who has the link can open the image until it expires, so do not share or 
   "id": 1,
   "patient_name": "Aman",
   "status": "completed",
+  "created_at": "2026-11-03T06:19:29.546498",
   "image_ids": [5],
   "predictions": [
     {
@@ -239,7 +257,7 @@ Anyone who has the link can open the image until it expires, so do not share or 
       "predicted_class": "Brain",
       "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
       "model_version": "mock-service-v1",
-      "reviews": [ { "doctor_id": 4, "comment": "Plane looks correct.", "created_at": "2026-11-05T10:00:00" } ]
+      "reviews": [ { "doctor_id": 4, "comment": "Plane looks correct.", "agrees": true, "created_at": "2026-11-05T10:00:00" } ]
     }
   ]
 }
@@ -249,11 +267,13 @@ Use each id in `image_ids` with `GET /images/{image_id}`. Error: `404` not found
 #### POST `/doctor/predictions/{prediction_id}/review`
 Request:
 ```json
-{ "comment": "Plane looks correct, image quality is good." }
+{ "comment": "Plane looks correct, image quality is good.", "agrees": true }
 ```
+`agrees` is optional (default `true`). Use `false` when the doctor disputes the result. `comment` is required (it may be an empty string), maximum 2000 characters. Send the plain comment; the old `[agrees]` tag is no longer needed.
+
 Response `201`:
 ```json
-{ "id": 1, "prediction_id": 7, "comment": "Plane looks correct, image quality is good." }
+{ "id": 1, "prediction_id": 7, "comment": "Plane looks correct, image quality is good.", "agrees": true }
 ```
 
 ---
@@ -264,6 +284,33 @@ Response `201`:
 ```json
 [ { "id": 1, "name": "Riya", "email": "riya@gmail.com", "role": "admin", "is_active": true } ]
 ```
+
+#### POST `/admin/users`
+Creates a user with a chosen role (the only way, besides the admin script, to create a doctor or admin).
+
+Request:
+```json
+{ "name": "Dr Rao", "email": "rao@gmail.com", "password": "password123", "role": "doctor" }
+```
+`role` is `patient`, `doctor` or `admin` (default `patient`). Same name, email and password rules as `/register`.
+
+Response `201`:
+```json
+{ "id": 5, "name": "Dr Rao", "email": "rao@gmail.com", "role": "doctor", "is_active": true }
+```
+Errors: `400` email already registered, `403` not an admin, `422` invalid field or role.
+
+#### PUT `/admin/users/{user_id}/role`
+Request:
+```json
+{ "role": "doctor" }
+```
+Response `200`:
+```json
+{ "id": 3, "email": "sara@gmail.com", "role": "doctor" }
+```
+Errors: `400` admin tried to change their own role, `404` user not found, `422` invalid role, `403` not an admin.
+The user's role takes effect immediately for permission checks. Their displayed role in the app updates after the next `GET /me`.
 
 #### PUT `/admin/users/{user_id}/active`
 Request:
@@ -282,7 +329,7 @@ Latest 100 entries, newest first.
 ```json
 [ { "id": 3, "user_id": 1, "action": "login_success", "detail": null, "created_at": "2026-11-06T18:42:16.480658" } ]
 ```
-Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `image_uploaded`, `image_viewed`, `image_link_created`, `image_viewed_via_link`, `prediction_run`, `review_added`, `user_activated`, `user_deactivated`.
+Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `image_uploaded`, `image_viewed`, `image_link_created`, `image_viewed_via_link`, `prediction_run`, `review_added`, `user_activated`, `user_deactivated`, `user_created_by_admin`, `user_role_changed`.
 
 ---
 
@@ -291,7 +338,8 @@ Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `im
 | Item | Status |
 |---|---|
 | Heatmap image (`heatmap_base64`) | Waiting for the real AI service (Member 3). The field is `null` in the mock |
-| Sign in with Google (Firebase) | Parked, pending answers from Member 5 |
+| Sign in with Google (Firebase) | Parked. Planned shape when added: `POST /auth/google` with `{ "id_token": "<Firebase ID token>" }`, returning the same `{ "access_token", "token_type" }` as `/login`. Nothing changes for the frontend until then |
+| Chat endpoint | Not planned. The frontend keeps its fixed answers |
 | Password change, forgot password | Not planned yet |
 
 Any change to this contract will be announced before it is made.

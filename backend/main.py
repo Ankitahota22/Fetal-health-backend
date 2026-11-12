@@ -1,8 +1,3 @@
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Request
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 import os
 from dotenv import load_dotenv
 import time
@@ -13,11 +8,16 @@ import io
 import hashlib
 import uuid
 from pathlib import Path
+from typing import Literal
 from PIL import Image, UnidentifiedImageError
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import bcrypt
 import jwt
 from datetime import datetime, timedelta, timezone
@@ -45,8 +45,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 origins = [
     o.strip()
     for o in os.getenv(
-        "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000"
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
     ).split(",")
+    if o.strip()
 ]
 
 app.add_middleware(
@@ -62,12 +64,11 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_FORMATS = {"JPEG": "jpg", "PNG": "png"}
 
+IMAGE_LINK_EXPIRE_MINUTES = 5
 
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8001")
 
-
 MAX_RETRIES = 3
-IMAGE_LINK_EXPIRE_MINUTES = 5
 
 
 def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dict:
@@ -92,14 +93,15 @@ def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dic
                 time.sleep(attempt)  # 1 sec, phir 2 sec rukna
     raise last_error
 
+
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
 def get_db():
-    
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
 
 def get_current_user(
     token: str = Depends(oauth2_scheme),
@@ -116,9 +118,11 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found or deactivated")
     return user
 
+
 def log_action(db: Session, action: str, user_id: int = None, detail: str = None):
     db.add(models.AuditLog(user_id=user_id, action=action, detail=detail))
     db.commit()
+
 
 def require_role(*allowed_roles: str):
     def checker(current_user: models.User = Depends(get_current_user)):
@@ -128,14 +132,23 @@ def require_role(*allowed_roles: str):
     return checker
 
 
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def latest_prediction(db: Session, assessment_id: int):
+    return (
+        db.query(models.Prediction)
+        .filter(models.Prediction.assessment_id == assessment_id)
+        .order_by(models.Prediction.id.desc())
+        .first()
+    )
+
+
 class UserRegister(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
-
-class UserLogin(BaseModel):
-    email: str
-    password: str
 
 
 @app.get("/")
@@ -156,20 +169,17 @@ def register(request: Request, user: UserRegister, db: Session = Depends(get_db)
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # 2. Password ko hash karo
-    hashed = bcrypt.hashpw(user.password.encode("utf-8"), bcrypt.gensalt())
-
-    # 3. Naya user banao aur database mein save karo
+    # 2. Naya user banao aur database mein save karo (password hash ke saath)
     new_user = models.User(
         name=user.name,
         email=user.email,
-        password_hash=hashed.decode("utf-8"),
+        password_hash=hash_password(user.password),
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    # 4. Response (password kabhi wapas nahi bhejte)
+    # 3. Response (password kabhi wapas nahi bhejte)
     return {
         "message": "User registered successfully",
         "id": new_user.id,
@@ -199,7 +209,6 @@ def login(
         raise HTTPException(status_code=403, detail="Account is deactivated")
 
     log_action(db, "login_success", user_id=db_user.id)
-    
 
     expire = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
     token = jwt.encode(
@@ -209,6 +218,18 @@ def login(
     )
     return {"access_token": token, "token_type": "bearer"}
 
+
+@app.get("/me")
+def read_me(current_user: models.User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "role": current_user.role,
+    }
+
+
+# ---------------- Admin ----------------
 
 @app.get("/admin/users")
 def list_users(
@@ -220,6 +241,131 @@ def list_users(
         {"id": u.id, "name": u.name, "email": u.email, "role": u.role, "is_active": u.is_active}
         for u in users
     ]
+
+
+class AdminUserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
+    role: Literal["patient", "doctor", "admin"] = "patient"
+
+
+@app.post("/admin/users", status_code=201)
+def admin_create_user(
+    body: AdminUserCreate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    existing = db.query(models.User).filter(models.User.email == body.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    new_user = models.User(
+        name=body.name,
+        email=body.email,
+        password_hash=hash_password(body.password),
+        role=body.role,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    log_action(
+        db,
+        "user_created_by_admin",
+        user_id=admin.id,
+        detail=f"target_user_id={new_user.id}, role={new_user.role}",
+    )
+    return {
+        "id": new_user.id,
+        "name": new_user.name,
+        "email": new_user.email,
+        "role": new_user.role,
+        "is_active": new_user.is_active,
+    }
+
+
+class RoleIn(BaseModel):
+    role: Literal["patient", "doctor", "admin"]
+
+
+@app.put("/admin/users/{user_id}/role")
+def set_user_role(
+    user_id: int,
+    body: RoleIn,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot change your own role")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.role = body.role
+    db.commit()
+    log_action(
+        db,
+        "user_role_changed",
+        user_id=admin.id,
+        detail=f"target_user_id={user.id}, role={user.role}",
+    )
+    return {"id": user.id, "email": user.email, "role": user.role}
+
+
+class ActiveIn(BaseModel):
+    is_active: bool
+
+
+@app.put("/admin/users/{user_id}/active")
+def set_user_active(
+    user_id: int,
+    body: ActiveIn,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot change your own status")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_active = body.is_active
+    db.commit()
+    log_action(
+        db,
+        "user_activated" if body.is_active else "user_deactivated",
+        user_id=admin.id,
+        detail=f"target_user_id={user.id}",
+    )
+    return {"id": user.id, "email": user.email, "is_active": user.is_active}
+
+
+@app.get("/admin/audit-logs")
+def list_audit_logs(
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_role("admin")),
+):
+    logs = (
+        db.query(models.AuditLog)
+        .order_by(models.AuditLog.id.desc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            "id": l.id,
+            "user_id": l.user_id,
+            "action": l.action,
+            "detail": l.detail,
+            "created_at": l.created_at,
+        }
+        for l in logs
+    ]
+
+
+# ---------------- Patient: assessments ----------------
 
 @app.post("/assessments", status_code=201)
 def create_assessment(
@@ -249,12 +395,7 @@ def my_assessments(
     )
     result = []
     for a in items:
-        latest = (
-            db.query(models.Prediction)
-            .filter(models.Prediction.assessment_id == a.id)
-            .order_by(models.Prediction.id.desc())
-            .first()
-        )
+        latest = latest_prediction(db, a.id)
         images = (
             db.query(models.ImageAsset)
             .filter(models.ImageAsset.assessment_id == a.id)
@@ -266,10 +407,63 @@ def my_assessments(
                 "status": a.status,
                 "created_at": a.created_at,
                 "predicted_class": latest.predicted_class if latest else None,
+                "probabilities": json.loads(latest.probabilities) if latest else None,
+                "model_version": latest.model_version if latest else None,
                 "image_ids": [i.id for i in images],
             }
         )
     return result
+
+
+@app.get("/assessments/{assessment_id}")
+def my_assessment_detail(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    a = (
+        db.query(models.Assessment)
+        .filter(
+            models.Assessment.id == assessment_id,
+            models.Assessment.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not a:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    images = db.query(models.ImageAsset).filter(models.ImageAsset.assessment_id == a.id).all()
+    preds = db.query(models.Prediction).filter(models.Prediction.assessment_id == a.id).all()
+
+    result = []
+    for p in preds:
+        reviews = (
+            db.query(models.DoctorReview)
+            .filter(models.DoctorReview.prediction_id == p.id)
+            .all()
+        )
+        result.append(
+            {
+                "id": p.id,
+                "predicted_class": p.predicted_class,
+                "probabilities": json.loads(p.probabilities),
+                "model_version": p.model_version,
+                "disclaimer": "Screening support only, not a diagnosis.",
+                "reviews": [
+                    {"comment": r.comment, "agrees": r.agrees, "created_at": r.created_at}
+                    for r in reviews
+                ],
+            }
+        )
+
+    return {
+        "id": a.id,
+        "status": a.status,
+        "created_at": a.created_at,
+        "image_ids": [i.id for i in images],
+        "predictions": result,
+    }
+
 
 @app.post("/assessments/{assessment_id}/image", status_code=201)
 def upload_image(
@@ -346,38 +540,6 @@ def upload_image(
         "sha256": asset.sha256,
     }
 
-@app.get("/images/{image_id}")
-def get_image(
-    image_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    # 1. Image record dhundho
-    asset = db.query(models.ImageAsset).filter(models.ImageAsset.id == image_id).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    # 2. Permission check
-    if current_user.role not in ("doctor", "admin"):
-        assessment = (
-            db.query(models.Assessment)
-            .filter(
-                models.Assessment.id == asset.assessment_id,
-                models.Assessment.user_id == current_user.id,
-            )
-            .first()
-        )
-        if not assessment:
-            raise HTTPException(status_code=404, detail="Image not found")
-
-    # 3. File disk par hai?
-    file_path = UPLOAD_DIR / asset.stored_name
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Image file missing")
-
-    # 4. Image bhejo
-    log_action(db, "image_viewed", user_id=current_user.id, detail=f"image_id={asset.id}")
-    return FileResponse(file_path, media_type=asset.content_type or "image/jpeg")
 
 @app.post("/assessments/{assessment_id}/predict", status_code=201)
 def run_prediction(
@@ -439,159 +601,42 @@ def run_prediction(
         "disclaimer": "Screening support only, not a diagnosis.",
     }
 
-class ReviewIn(BaseModel):
-    comment: str
 
+# ---------------- Images ----------------
 
-@app.get("/doctor/assessments")
-def doctor_list_assessments(
-    db: Session = Depends(get_db),
-    doctor: models.User = Depends(require_role("doctor", "admin")),
-):
-    items = db.query(models.Assessment).all()
-    return [
-        {
-            "id": a.id,
-            "patient_id": a.user_id,
-            "patient_name": a.owner.name,
-            "status": a.status,
-            "created_at": a.created_at,
-        }
-        for a in items
-    ]
-
-
-@app.get("/doctor/assessments/{assessment_id}")
-def doctor_assessment_detail(
-    assessment_id: int,
-    db: Session = Depends(get_db),
-    doctor: models.User = Depends(require_role("doctor", "admin")),
-):
-    a = db.query(models.Assessment).filter(models.Assessment.id == assessment_id).first()
-    if not a:
-        raise HTTPException(status_code=404, detail="Assessment not found")
-
-    images = db.query(models.ImageAsset).filter(models.ImageAsset.assessment_id == a.id).all()
-    preds = db.query(models.Prediction).filter(models.Prediction.assessment_id == a.id).all()
-
-    result = []
-    for p in preds:
-        reviews = (
-            db.query(models.DoctorReview)
-            .filter(models.DoctorReview.prediction_id == p.id)
-            .all()
-        )
-        result.append(
-            {
-                "id": p.id,
-                "predicted_class": p.predicted_class,
-                "probabilities": json.loads(p.probabilities),
-                "model_version": p.model_version,
-                "reviews": [
-                    {"doctor_id": r.doctor_id, "comment": r.comment, "created_at": r.created_at}
-                    for r in reviews
-                ],
-            }
-        )
-
-    return {
-        "id": a.id,
-        "patient_name": a.owner.name,
-        "status": a.status,
-        "image_ids": [i.id for i in images],
-        "predictions": result,
-    }
-
-
-@app.post("/doctor/predictions/{prediction_id}/review", status_code=201)
-def add_review(
-    prediction_id: int,
-    body: ReviewIn,
-    db: Session = Depends(get_db),
-    doctor: models.User = Depends(require_role("doctor", "admin")),
-):
-    pred = db.query(models.Prediction).filter(models.Prediction.id == prediction_id).first()
-    if not pred:
-        raise HTTPException(status_code=404, detail="Prediction not found")
-
-    review = models.DoctorReview(
-        prediction_id=pred.id, doctor_id=doctor.id, comment=body.comment
-    )
-    db.add(review)
-    db.commit()
-    db.refresh(review)
-    log_action(db, "review_added", user_id=doctor.id, detail=f"review_id={review.id}")
-    return {"id": review.id, "prediction_id": review.prediction_id, "comment": review.comment}
-
-@app.get("/admin/audit-logs")
-def list_audit_logs(
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
-):
-    logs = (
-        db.query(models.AuditLog)
-        .order_by(models.AuditLog.id.desc())
-        .limit(100)
-        .all()
-    )
-    return [
-        {
-            "id": l.id,
-            "user_id": l.user_id,
-            "action": l.action,
-            "detail": l.detail,
-            "created_at": l.created_at,
-        }
-        for l in logs
-    ]
-
-@app.get("/assessments/{assessment_id}")
-def my_assessment_detail(
-    assessment_id: int,
+@app.get("/images/{image_id}")
+def get_image(
+    image_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    a = (
-        db.query(models.Assessment)
-        .filter(
-            models.Assessment.id == assessment_id,
-            models.Assessment.user_id == current_user.id,
-        )
-        .first()
-    )
-    if not a:
-        raise HTTPException(status_code=404, detail="Assessment not found")
+    # 1. Image record dhundho
+    asset = db.query(models.ImageAsset).filter(models.ImageAsset.id == image_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Image not found")
 
-    images = db.query(models.ImageAsset).filter(models.ImageAsset.assessment_id == a.id).all()
-    preds = db.query(models.Prediction).filter(models.Prediction.assessment_id == a.id).all()
-
-    result = []
-    for p in preds:
-        reviews = (
-            db.query(models.DoctorReview)
-            .filter(models.DoctorReview.prediction_id == p.id)
-            .all()
+    # 2. Permission check
+    if current_user.role not in ("doctor", "admin"):
+        assessment = (
+            db.query(models.Assessment)
+            .filter(
+                models.Assessment.id == asset.assessment_id,
+                models.Assessment.user_id == current_user.id,
+            )
+            .first()
         )
-        result.append(
-            {
-                "id": p.id,
-                "predicted_class": p.predicted_class,
-                "probabilities": json.loads(p.probabilities),
-                "model_version": p.model_version,
-                "disclaimer": "Screening support only, not a diagnosis.",
-                "reviews": [
-                    {"comment": r.comment, "created_at": r.created_at} for r in reviews
-                ],
-            }
-        )
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Image not found")
 
-    return {
-        "id": a.id,
-        "status": a.status,
-        "created_at": a.created_at,
-        "image_ids": [i.id for i in images],
-        "predictions": result,
-    }
+    # 3. File disk par hai?
+    file_path = UPLOAD_DIR / asset.stored_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image file missing")
+
+    # 4. Image bhejo
+    log_action(db, "image_viewed", user_id=current_user.id, detail=f"image_id={asset.id}")
+    return FileResponse(file_path, media_type=asset.content_type or "image/jpeg")
+
 
 @app.post("/images/{image_id}/link")
 def create_image_link(
@@ -661,39 +706,110 @@ def get_image_by_link(token: str, db: Session = Depends(get_db)):
         headers={"Cache-Control": "private, no-store"},
     )
 
-class ActiveIn(BaseModel):
-    is_active: bool
+
+# ---------------- Doctor ----------------
+
+class ReviewIn(BaseModel):
+    comment: str = Field(max_length=2000)
+    agrees: bool = True
 
 
-@app.put("/admin/users/{user_id}/active")
-def set_user_active(
-    user_id: int,
-    body: ActiveIn,
+@app.get("/doctor/assessments")
+def doctor_list_assessments(
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    doctor: models.User = Depends(require_role("doctor", "admin")),
 ):
-    if user_id == admin.id:
-        raise HTTPException(status_code=400, detail="You cannot change your own status")
+    items = db.query(models.Assessment).all()
+    result = []
+    for a in items:
+        latest = latest_prediction(db, a.id)
+        result.append(
+            {
+                "id": a.id,
+                "patient_id": a.user_id,
+                "patient_name": a.owner.name,
+                "status": a.status,
+                "created_at": a.created_at,
+                "predicted_class": latest.predicted_class if latest else None,
+                "probabilities": json.loads(latest.probabilities) if latest else None,
+                "model_version": latest.model_version if latest else None,
+            }
+        )
+    return result
 
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
 
-    user.is_active = body.is_active
-    db.commit()
-    log_action(
-        db,
-        "user_activated" if body.is_active else "user_deactivated",
-        user_id=admin.id,
-        detail=f"target_user_id={user.id}",
-    )
-    return {"id": user.id, "email": user.email, "is_active": user.is_active}
+@app.get("/doctor/assessments/{assessment_id}")
+def doctor_assessment_detail(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+    doctor: models.User = Depends(require_role("doctor", "admin")),
+):
+    a = db.query(models.Assessment).filter(models.Assessment.id == assessment_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="Assessment not found")
 
-@app.get("/me")
-def read_me(current_user: models.User = Depends(get_current_user)):
+    images = db.query(models.ImageAsset).filter(models.ImageAsset.assessment_id == a.id).all()
+    preds = db.query(models.Prediction).filter(models.Prediction.assessment_id == a.id).all()
+
+    result = []
+    for p in preds:
+        reviews = (
+            db.query(models.DoctorReview)
+            .filter(models.DoctorReview.prediction_id == p.id)
+            .all()
+        )
+        result.append(
+            {
+                "id": p.id,
+                "predicted_class": p.predicted_class,
+                "probabilities": json.loads(p.probabilities),
+                "model_version": p.model_version,
+                "reviews": [
+                    {
+                        "doctor_id": r.doctor_id,
+                        "comment": r.comment,
+                        "agrees": r.agrees,
+                        "created_at": r.created_at,
+                    }
+                    for r in reviews
+                ],
+            }
+        )
+
     return {
-        "id": current_user.id,
-        "name": current_user.name,
-        "email": current_user.email,
-        "role": current_user.role,
+        "id": a.id,
+        "patient_name": a.owner.name,
+        "status": a.status,
+        "created_at": a.created_at,
+        "image_ids": [i.id for i in images],
+        "predictions": result,
+    }
+
+
+@app.post("/doctor/predictions/{prediction_id}/review", status_code=201)
+def add_review(
+    prediction_id: int,
+    body: ReviewIn,
+    db: Session = Depends(get_db),
+    doctor: models.User = Depends(require_role("doctor", "admin")),
+):
+    pred = db.query(models.Prediction).filter(models.Prediction.id == prediction_id).first()
+    if not pred:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+
+    review = models.DoctorReview(
+        prediction_id=pred.id,
+        doctor_id=doctor.id,
+        comment=body.comment,
+        agrees=body.agrees,
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+    log_action(db, "review_added", user_id=doctor.id, detail=f"review_id={review.id}")
+    return {
+        "id": review.id,
+        "prediction_id": review.prediction_id,
+        "comment": review.comment,
+        "agrees": review.agrees,
     }

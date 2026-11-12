@@ -245,3 +245,87 @@ def test_audit_log_admin_only_and_records_login(client, make_user):
     r = client.get("/admin/audit-logs", headers=admin)
     assert r.status_code == 200
     assert "login_success" in [row["action"] for row in r.json()]
+
+
+# ---------- Frontend requests (v1.3) ----------
+
+def test_list_endpoints_include_prediction_summary(client, make_user, patient_with_image):
+    p = patient_with_image
+    aid = p["assessment_id"]
+    client.post(f"/assessments/{aid}/predict", headers=p["headers"])
+    doctor = make_user("dr@gmail.com", role="doctor")
+
+    mine = client.get("/assessments", headers=p["headers"]).json()[0]
+    assert mine["model_version"] == "test-v1"
+    assert mine["probabilities"]["Brain"] == 0.82
+
+    row = client.get("/doctor/assessments", headers=doctor).json()[0]
+    assert row["predicted_class"] == "Brain"
+    assert row["model_version"] == "test-v1"
+    assert "Brain" in row["probabilities"]
+
+    detail = client.get(f"/doctor/assessments/{aid}", headers=doctor).json()
+    assert detail["created_at"]
+
+
+def test_summary_is_null_before_prediction(client, make_user):
+    h = make_user("aman@gmail.com")
+    doctor = make_user("dr@gmail.com", role="doctor")
+    client.post("/assessments", headers=h)
+    mine = client.get("/assessments", headers=h).json()[0]
+    assert mine["predicted_class"] is None and mine["probabilities"] is None
+    row = client.get("/doctor/assessments", headers=doctor).json()[0]
+    assert row["predicted_class"] is None and row["model_version"] is None
+
+
+def test_review_agrees_field(client, make_user, patient_with_image):
+    p = patient_with_image
+    aid = p["assessment_id"]
+    pred_id = client.post(f"/assessments/{aid}/predict", headers=p["headers"]).json()["id"]
+    doctor = make_user("dr@gmail.com", role="doctor")
+    url = f"/doctor/predictions/{pred_id}/review"
+
+    r = client.post(url, json={"comment": "Not the right plane", "agrees": False}, headers=doctor)
+    assert r.status_code == 201 and r.json()["agrees"] is False
+    r = client.post(url, json={"comment": "Fine"}, headers=doctor)  # agrees default True
+    assert r.json()["agrees"] is True
+
+    detail = client.get(f"/doctor/assessments/{aid}", headers=doctor).json()
+    assert [x["agrees"] for x in detail["predictions"][0]["reviews"]] == [False, True]
+    mine = client.get(f"/assessments/{aid}", headers=p["headers"]).json()
+    assert [x["agrees"] for x in mine["predictions"][0]["reviews"]] == [False, True]
+
+
+def test_admin_creates_user(client, make_user):
+    admin = make_user("riya@gmail.com", role="admin")
+    patient = make_user("aman@gmail.com")
+    body = {"name": "Dr Rao", "email": "rao@gmail.com", "password": "password123", "role": "doctor"}
+
+    assert client.post("/admin/users", json=body, headers=patient).status_code == 403
+    r = client.post("/admin/users", json=body, headers=admin)
+    assert r.status_code == 201 and r.json()["role"] == "doctor"
+    assert "password" not in r.json() and "password_hash" not in r.json()
+
+    assert client.post("/admin/users", json=body, headers=admin).status_code == 400
+    bad_role = {**body, "email": "x@gmail.com", "role": "superuser"}
+    assert client.post("/admin/users", json=bad_role, headers=admin).status_code == 422
+
+    login = client.post("/login", data={"username": "rao@gmail.com", "password": "password123"})
+    assert login.status_code == 200
+
+
+def test_admin_changes_role(client, make_user):
+    admin = make_user("riya@gmail.com", role="admin")
+    user = make_user("sara@gmail.com")
+    uid = client.get("/me", headers=user).json()["id"]
+    my_id = client.get("/me", headers=admin).json()["id"]
+
+    assert client.put(f"/admin/users/{uid}/role", json={"role": "doctor"}, headers=user).status_code == 403
+    r = client.put(f"/admin/users/{uid}/role", json={"role": "doctor"}, headers=admin)
+    assert r.status_code == 200 and r.json()["role"] == "doctor"
+    assert client.get("/admin/users", headers=user).status_code == 403  # doctor, admin nahi
+    assert client.get("/doctor/assessments", headers=user).status_code == 200
+
+    assert client.put(f"/admin/users/{my_id}/role", json={"role": "patient"}, headers=admin).status_code == 400
+    assert client.put(f"/admin/users/{uid}/role", json={"role": "boss"}, headers=admin).status_code == 422
+    assert client.put("/admin/users/9999/role", json={"role": "doctor"}, headers=admin).status_code == 404
