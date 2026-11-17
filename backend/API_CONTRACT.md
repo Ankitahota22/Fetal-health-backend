@@ -2,7 +2,7 @@
 
 Project: Hybrid QML Platform for Fetal Health
 Owner: Member 4 (Backend). Reader: Member 5 (Frontend).
-Version: 1.3 (draft). Summary fields in lists, `created_at` in doctor detail, review `agrees`, admin create user and change role.
+Version: 1.4 (draft). Real AI model classes (Small, Medium, Large), heatmap support, `502` error, `prediction_id` and `has_heatmap` in lists.
 
 Base URL (local): `http://127.0.0.1:8000`
 Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
@@ -35,6 +35,7 @@ Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
 | 415 | Image is not JPEG or PNG |
 | 422 | Request body or field is invalid |
 | 429 | Too many requests |
+| 502 | AI service answered in an unexpected format |
 | 503 | AI service is down or too slow |
 
 ---
@@ -51,7 +52,9 @@ Live, testable docs (Swagger): `http://127.0.0.1:8000/docs`
 | GET | `/assessments` | Logged-in user | My screenings (own only), with latest result and image ids |
 | GET | `/assessments/{id}` | Owner of the assessment | One of my screenings in detail (all predictions, probabilities, doctor comments) |
 | POST | `/assessments/{id}/image` | Owner of the assessment | Upload an ultrasound image |
-| POST | `/assessments/{id}/predict` | Owner of the assessment | Run the AI on the latest image |
+| POST | `/assessments/{id}/predict` | Owner of the assessment | Run the AI on the latest image (add `?heatmap=true` for a heatmap) |
+| POST | `/predictions/{prediction_id}/heatmap/link` | Owner, doctor, admin | Get a temporary heatmap link (5 minutes) |
+| GET | `/heatmap-links/{token}` | Anyone with the link | Open the heatmap PNG (no header needed) |
 | GET | `/images/{image_id}` | Owner, doctor, admin | Download an image (needs the Authorization header) |
 | POST | `/images/{image_id}/link` | Owner, doctor, admin | Get a temporary image link (5 minutes) |
 | GET | `/image-links/{token}` | Anyone with the link | Open the image from a temporary link (no header needed) |
@@ -123,9 +126,11 @@ Only the logged-in user's own assessments. Use this for the history list. Respon
     "id": 3,
     "status": "completed",
     "created_at": "2026-11-03T06:21:41.240998",
-    "predicted_class": "Brain",
-    "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
-    "model_version": "mock-service-v1",
+    "predicted_class": "Medium",
+    "probabilities": { "Small": 0.20, "Medium": 0.70, "Large": 0.10 },
+    "model_version": "hybrid-fetal-hc-v1.0.0",
+    "prediction_id": 7,
+    "has_heatmap": true,
     "image_ids": [5]
   },
   {
@@ -135,12 +140,14 @@ Only the logged-in user's own assessments. Use this for the history list. Respon
     "predicted_class": null,
     "probabilities": null,
     "model_version": null,
+    "prediction_id": null,
+    "has_heatmap": false,
     "image_ids": []
   }
 ]
 ```
 `status` is `pending` until a prediction is run, then `completed`.
-`predicted_class`, `probabilities` and `model_version` come from the latest prediction, or are `null` if there is none yet.
+`predicted_class`, `probabilities`, `model_version`, `prediction_id` and `has_heatmap` come from the latest prediction, or are `null` / `false` if there is none yet.
 `image_ids` is empty until an image is uploaded.
 
 #### GET `/assessments/{id}`
@@ -154,9 +161,10 @@ One of the logged-in user's own assessments, in detail. Use this for the history
   "predictions": [
     {
       "id": 7,
-      "predicted_class": "Brain",
-      "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
-      "model_version": "mock-service-v1",
+      "predicted_class": "Medium",
+      "probabilities": { "Small": 0.20, "Medium": 0.70, "Large": 0.10 },
+      "model_version": "hybrid-fetal-hc-v1.0.0",
+      "has_heatmap": true,
       "disclaimer": "Screening support only, not a diagnosis.",
       "reviews": [ { "comment": "Plane looks correct.", "agrees": true, "created_at": "2026-11-05T10:00:00" } ]
     }
@@ -187,22 +195,39 @@ Errors: `400` empty or corrupt file, `404` assessment not found (or not yours), 
 Keep the returned `id`: it is the `image_id` for `GET /images/{image_id}`.
 
 #### POST `/assessments/{id}/predict`
-No body. Uses the latest image of that assessment. May take a few seconds (the backend retries the AI service up to 3 times).
+No body. Uses the latest image of that assessment. Takes well under a second for the real model without a heatmap; the backend retries the AI service up to 3 times.
+
+Optional query parameter: `?heatmap=true` also creates a heatmap (slower, timeout 30 seconds). Default is no heatmap.
 
 Response `201`:
 ```json
 {
   "id": 7,
   "assessment_id": 1,
-  "predicted_class": "Brain",
-  "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
-  "model_version": "mock-service-v1",
+  "predicted_class": "Medium",
+  "probabilities": { "Small": 0.20, "Medium": 0.70, "Large": 0.10 },
+  "model_version": "hybrid-fetal-hc-v1.0.0",
+  "has_heatmap": true,
+  "heatmap_note": "Shows which pixels changed the model output the most. It is not proof of a finding.",
   "disclaimer": "Screening support only, not a diagnosis."
 }
 ```
-Errors: `400` no image uploaded yet, `404` assessment not found, `503` AI service unavailable.
+`has_heatmap` is `false` when no heatmap was asked for or it could not be created. If one was asked for but could not be created, `heatmap_message` explains it, and the prediction is still saved.
+Errors: `400` no image uploaded yet, `404` assessment not found, `502` unexpected AI response, `503` AI service unavailable.
 
-Show the `disclaimer` and `model_version` in the UI.
+The classes are **Small, Medium and Large**: head-circumference categories derived from dataset percentiles, not clinical diagnoses. Show the `disclaimer`, `model_version` and `heatmap_note` in the UI.
+
+#### POST `/predictions/{prediction_id}/heatmap/link`  (auth)
+Creates a temporary link for the heatmap of one prediction. A patient can only use their own predictions; doctor and admin can use any.
+
+Response `200`:
+```json
+{ "url": "/heatmap-links/eyJhbGciOi...", "expires_in_seconds": 300, "note": "Shows which pixels changed the model output the most. It is not proof of a finding." }
+```
+Errors: `404` prediction not found, not yours, or it has no heatmap.
+
+#### GET `/heatmap-links/{token}`  (no auth header needed)
+Open `BASE_URL + url` in `<img src>`. Returns a PNG (256 by 256 pixels). Works for 5 minutes, then `401 Link expired or invalid`. A login token or an image link cannot be used here. The map is a visualisation of the model, may also highlight scan borders or background, and is not proof of a finding.
 
 #### GET `/images/{image_id}`  (auth)
 Returns the image file (`image/jpeg` or `image/png`).
@@ -236,9 +261,11 @@ Anyone who has the link can open the image until it expires, so do not share or 
     "patient_name": "Aman",
     "status": "completed",
     "created_at": "2026-11-03T06:19:29.546498",
-    "predicted_class": "Brain",
-    "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
-    "model_version": "mock-service-v1"
+    "predicted_class": "Medium",
+    "probabilities": { "Small": 0.20, "Medium": 0.70, "Large": 0.10 },
+    "model_version": "hybrid-fetal-hc-v1.0.0",
+    "prediction_id": 7,
+    "has_heatmap": true
   }
 ]
 ```
@@ -254,9 +281,10 @@ Anyone who has the link can open the image until it expires, so do not share or 
   "predictions": [
     {
       "id": 7,
-      "predicted_class": "Brain",
-      "probabilities": { "Brain": 0.82, "Abdomen": 0.05, "Femur": 0.03, "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04 },
-      "model_version": "mock-service-v1",
+      "predicted_class": "Medium",
+      "probabilities": { "Small": 0.20, "Medium": 0.70, "Large": 0.10 },
+      "model_version": "hybrid-fetal-hc-v1.0.0",
+      "has_heatmap": true,
       "reviews": [ { "doctor_id": 4, "comment": "Plane looks correct.", "agrees": true, "created_at": "2026-11-05T10:00:00" } ]
     }
   ]
@@ -329,7 +357,7 @@ Latest 100 entries, newest first.
 ```json
 [ { "id": 3, "user_id": 1, "action": "login_success", "detail": null, "created_at": "2026-11-06T18:42:16.480658" } ]
 ```
-Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `image_uploaded`, `image_viewed`, `image_link_created`, `image_viewed_via_link`, `prediction_run`, `review_added`, `user_activated`, `user_deactivated`, `user_created_by_admin`, `user_role_changed`.
+Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `image_uploaded`, `image_viewed`, `image_link_created`, `image_viewed_via_link`, `heatmap_link_created`, `heatmap_viewed_via_link`, `prediction_run`, `review_added`, `user_activated`, `user_deactivated`, `user_created_by_admin`, `user_role_changed`.
 
 ---
 
@@ -337,7 +365,7 @@ Actions recorded: `login_success`, `login_failed`, `login_blocked_inactive`, `im
 
 | Item | Status |
 |---|---|
-| Heatmap image (`heatmap_base64`) | Waiting for the real AI service (Member 3). The field is `null` in the mock |
+| Pixel size input | The real model assumes a default pixel size (0.128 mm, the training median) because uploaded images carry none. Categories are therefore approximate |
 | Sign in with Google (Firebase) | Parked. Planned shape when added: `POST /auth/google` with `{ "id_token": "<Firebase ID token>" }`, returning the same `{ "access_token", "token_type" }` as `/login`. Nothing changes for the frontend until then |
 | Chat endpoint | Not planned. The frontend keeps its fixed answers |
 | Password change, forgot password | Not planned yet |

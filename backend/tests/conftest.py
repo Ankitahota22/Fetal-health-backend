@@ -1,3 +1,4 @@
+import base64
 import io
 import os
 
@@ -15,7 +16,13 @@ import main
 import models
 
 
-def fake_ai(image_bytes, filename, content_type):
+def tiny_png_b64():
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def fake_ai(image_bytes, filename, content_type, include_heatmap=False):
     """Nakli AI service: real service call nahi hoti tests mein."""
     return {
         "predicted_class": "Brain",
@@ -24,7 +31,7 @@ def fake_ai(image_bytes, filename, content_type):
             "Thorax": 0.04, "Cervix": 0.02, "Other": 0.04,
         },
         "model_version": "test-v1",
-        "heatmap_base64": None,
+        "heatmap_base64": tiny_png_b64() if include_heatmap else None,
     }
 
 

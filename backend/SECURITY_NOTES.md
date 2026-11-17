@@ -34,6 +34,7 @@ The application is a screening-support tool, not a diagnostic device. Only publi
 | 21 | Expiring image links | A permission-checked, signed link valid for 5 minutes lets the frontend show an image without exposing the login token. Login tokens cannot be used as image links, and the response is marked no-store | Time-limited access to patient images |
 | 22 | Account deactivation | An admin can deactivate a user. The user cannot log in and the existing token stops working at once. An admin cannot deactivate themselves. Changes are audit-logged | Removes access quickly when needed |
 | 24 | Admin user management | Only admins can create users or change roles. Admins cannot change their own role or status. Every change is audit-logged | Controlled privilege changes |
+| 25 | Heatmap handling | The AI service heatmap is decoded, checked as a real PNG (maximum 5 MB) and stored in the private folder with a random name. Access is only through permission-checked, 5-minute signed links that cannot be mixed up with login tokens or image links. Error text from the AI service is not passed on to users | Unsafe or leaked AI output |
 | 23 | Schema migrations | Alembic migration scripts track database changes without losing data | Safe, repeatable database updates |
 
 ---
@@ -56,6 +57,7 @@ We list these openly so the team and evaluators know the real state.
 | 10 | Upload size limit at the proxy | The 10 MB limit is enforced in code. The reverse proxy limit must also be set at deployment |
 | 11 | Audit log protection | Stored in the same database. Not tamper-proof |
 | 12 | Doctor access scope | Any doctor can see all patients' assessments (no doctor-patient assignment yet) |
+| 14 | Service-to-service trust | The backend calls the AI service without authentication; it must run on a private network (for example the docker-compose network) and not be exposed publicly |
 | 13 | Dataset licence | The two datasets are CC BY 4.0. Credit must appear on the attribution page |
 
 ---

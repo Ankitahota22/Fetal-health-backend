@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 import time
 import httpx
 import json
+import base64
+import binascii
 from fastapi.responses import FileResponse
 import io
 import hashlib
@@ -65,20 +67,31 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_FORMATS = {"JPEG": "jpg", "PNG": "png"}
 
 IMAGE_LINK_EXPIRE_MINUTES = 5
+HEATMAP_LINK_EXPIRE_MINUTES = 5
+MAX_HEATMAP_BYTES = 5 * 1024 * 1024  # 5 MB
+AI_TIMEOUT_SECONDS = 10.0
+AI_HEATMAP_TIMEOUT_SECONDS = 30.0  # heatmap banane mein zyada time lag sakta hai
+HEATMAP_NOTE = (
+    "Shows which pixels changed the model output the most. It is not proof of a finding."
+)
 
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8001")
 
 MAX_RETRIES = 3
 
 
-def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dict:
+def call_ai_service(
+    image_bytes: bytes, filename: str, content_type: str, include_heatmap: bool = False
+) -> dict:
+    timeout = AI_HEATMAP_TIMEOUT_SECONDS if include_heatmap else AI_TIMEOUT_SECONDS
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = httpx.post(
                 f"{AI_SERVICE_URL}/predict",
                 files={"file": (filename, image_bytes, content_type)},
-                timeout=10.0,
+                data={"include_heatmap": "true" if include_heatmap else "false"},
+                timeout=timeout,
             )
             # 4xx = hamari galti (galat image), retry ka fayda nahi
             if 400 <= response.status_code < 500:
@@ -92,6 +105,28 @@ def call_ai_service(image_bytes: bytes, filename: str, content_type: str) -> dic
             if attempt < MAX_RETRIES:
                 time.sleep(attempt)  # 1 sec, phir 2 sec rukna
     raise last_error
+
+
+def save_heatmap(heatmap_b64):
+    """AI service ka base64 PNG check karke private folder mein save karo. Galat ho to None."""
+    if not heatmap_b64 or not isinstance(heatmap_b64, str):
+        return None
+    try:
+        raw = base64.b64decode(heatmap_b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw or len(raw) > MAX_HEATMAP_BYTES:
+        return None
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.verify()
+        if Image.open(io.BytesIO(raw)).format != "PNG":
+            return None
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError):
+        return None
+    name = f"{uuid.uuid4().hex}_heatmap.png"
+    (UPLOAD_DIR / name).write_bytes(raw)
+    return name
 
 
 # Har request ke liye database session kholta hai, kaam ke baad band karta hai
@@ -143,6 +178,24 @@ def latest_prediction(db: Session, assessment_id: int):
         .order_by(models.Prediction.id.desc())
         .first()
     )
+
+
+def get_prediction_for_user(db: Session, prediction_id: int, user: models.User):
+    pred = db.query(models.Prediction).filter(models.Prediction.id == prediction_id).first()
+    if not pred:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    if user.role not in ("doctor", "admin"):
+        owner = (
+            db.query(models.Assessment)
+            .filter(
+                models.Assessment.id == pred.assessment_id,
+                models.Assessment.user_id == user.id,
+            )
+            .first()
+        )
+        if not owner:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+    return pred
 
 
 class UserRegister(BaseModel):
@@ -409,6 +462,8 @@ def my_assessments(
                 "predicted_class": latest.predicted_class if latest else None,
                 "probabilities": json.loads(latest.probabilities) if latest else None,
                 "model_version": latest.model_version if latest else None,
+                "prediction_id": latest.id if latest else None,
+                "has_heatmap": bool(latest and latest.heatmap_name),
                 "image_ids": [i.id for i in images],
             }
         )
@@ -448,6 +503,7 @@ def my_assessment_detail(
                 "predicted_class": p.predicted_class,
                 "probabilities": json.loads(p.probabilities),
                 "model_version": p.model_version,
+                "has_heatmap": p.heatmap_name is not None,
                 "disclaimer": "Screening support only, not a diagnosis.",
                 "reviews": [
                     {"comment": r.comment, "agrees": r.agrees, "created_at": r.created_at}
@@ -544,6 +600,7 @@ def upload_image(
 @app.post("/assessments/{assessment_id}/predict", status_code=201)
 def run_prediction(
     assessment_id: int,
+    heatmap: bool = False,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -573,7 +630,10 @@ def run_prediction(
     image_bytes = (UPLOAD_DIR / asset.stored_name).read_bytes()
     try:
         result = call_ai_service(
-            image_bytes, asset.stored_name, asset.content_type or "image/jpeg"
+            image_bytes,
+            asset.stored_name,
+            asset.content_type or "image/jpeg",
+            include_heatmap=heatmap,
         )
     except httpx.HTTPError:
         raise HTTPException(status_code=503, detail="AI service unavailable")
@@ -584,12 +644,16 @@ def run_prediction(
     if not predicted_class or not probabilities:
         raise HTTPException(status_code=502, detail="AI service returned an unexpected response")
 
+    # Heatmap (sirf jab maangi gayi ho): check karke private folder mein save karo
+    heatmap_name = save_heatmap(result.get("heatmap_base64")) if heatmap else None
+
     # 4. Result save karo
     prediction = models.Prediction(
         assessment_id=assessment.id,
         predicted_class=predicted_class,
         probabilities=json.dumps(probabilities),
         model_version=result.get("model_version", "unknown"),
+        heatmap_name=heatmap_name,
     )
     db.add(prediction)
     assessment.status = "completed"
@@ -598,14 +662,20 @@ def run_prediction(
 
     log_action(db, "prediction_run", user_id=current_user.id, detail=f"prediction_id={prediction.id}")
 
-    return {
+    response = {
         "id": prediction.id,
         "assessment_id": prediction.assessment_id,
         "predicted_class": prediction.predicted_class,
         "probabilities": probabilities,
         "model_version": prediction.model_version,
+        "has_heatmap": heatmap_name is not None,
         "disclaimer": "Screening support only, not a diagnosis.",
     }
+    if heatmap_name:
+        response["heatmap_note"] = HEATMAP_NOTE
+    elif heatmap:
+        response["heatmap_message"] = "Heatmap not available for this image."
+    return response
 
 
 # ---------------- Images ----------------
@@ -713,6 +783,63 @@ def get_image_by_link(token: str, db: Session = Depends(get_db)):
     )
 
 
+@app.post("/predictions/{prediction_id}/heatmap/link")
+def create_heatmap_link(
+    prediction_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    pred = get_prediction_for_user(db, prediction_id, current_user)
+    if not pred.heatmap_name:
+        raise HTTPException(status_code=404, detail="No heatmap for this prediction")
+
+    expire = datetime.now(timezone.utc) + timedelta(minutes=HEATMAP_LINK_EXPIRE_MINUTES)
+    token = jwt.encode(
+        {"type": "heatmap_link", "prediction_id": pred.id, "uid": current_user.id, "exp": expire},
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
+    log_action(db, "heatmap_link_created", user_id=current_user.id, detail=f"prediction_id={pred.id}")
+    return {
+        "url": f"/heatmap-links/{token}",
+        "expires_in_seconds": HEATMAP_LINK_EXPIRE_MINUTES * 60,
+        "note": HEATMAP_NOTE,
+    }
+
+
+@app.get("/heatmap-links/{token}")
+def get_heatmap_by_link(token: str, db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Link expired or invalid")
+
+    # Login token ya image link se heatmap nahi khulna chahiye
+    if payload.get("type") != "heatmap_link":
+        raise HTTPException(status_code=401, detail="Link expired or invalid")
+
+    pred = (
+        db.query(models.Prediction)
+        .filter(models.Prediction.id == payload.get("prediction_id"))
+        .first()
+    )
+    if not pred or not pred.heatmap_name:
+        raise HTTPException(status_code=404, detail="Heatmap not found")
+
+    file_path = UPLOAD_DIR / pred.heatmap_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Heatmap file missing")
+
+    log_action(
+        db, "heatmap_viewed_via_link", user_id=payload.get("uid"), detail=f"prediction_id={pred.id}"
+    )
+    return FileResponse(
+        file_path,
+        media_type="image/png",
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 # ---------------- Doctor ----------------
 
 class ReviewIn(BaseModel):
@@ -739,6 +866,8 @@ def doctor_list_assessments(
                 "predicted_class": latest.predicted_class if latest else None,
                 "probabilities": json.loads(latest.probabilities) if latest else None,
                 "model_version": latest.model_version if latest else None,
+                "prediction_id": latest.id if latest else None,
+                "has_heatmap": bool(latest and latest.heatmap_name),
             }
         )
     return result
@@ -770,6 +899,7 @@ def doctor_assessment_detail(
                 "predicted_class": p.predicted_class,
                 "probabilities": json.loads(p.probabilities),
                 "model_version": p.model_version,
+                "has_heatmap": p.heatmap_name is not None,
                 "reviews": [
                     {
                         "doctor_id": r.doctor_id,

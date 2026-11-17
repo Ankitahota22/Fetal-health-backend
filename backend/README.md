@@ -73,6 +73,18 @@ cd ..\mock_ai_service
 uvicorn main:app --reload --port 8001
 ```
 
+Or the real AI service from Member 3 (`ai-service/`, separate virtual environment because it needs torch and PennyLane):
+
+```
+cd ai-service
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn api:app --port 8001
+```
+
+The real service starts slowly (up to about two minutes while the model loads). It returns the categories Small, Medium and Large (head circumference, a research prototype, not a diagnosis). Add `?heatmap=true` to `POST /assessments/{id}/predict` to also get a heatmap.
+
 Open `http://127.0.0.1:8000/docs` for the interactive Swagger page.
 
 ## Create a doctor or admin account
@@ -127,7 +139,7 @@ backend/
 ## Known open items
 
 - Sign in with Google (Firebase): waiting for frontend decisions
-- Real AI service address and heatmap format: waiting for Member 3
+- Real AI service is integrated and tested locally; running it together with the backend in docker-compose is still to be done
 - docker-compose with the AI service, cloud deployment, PostgreSQL: to be done with the team
 - Dockerfile is written but not yet tested on this machine
 

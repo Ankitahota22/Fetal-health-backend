@@ -47,6 +47,7 @@ class Prediction(Base):
     predicted_class = Column(String, nullable=False)
     probabilities = Column(String, nullable=False)   # JSON text mein save hota hai
     model_version = Column(String, nullable=False)
+    heatmap_name = Column(String, nullable=True)   # heatmap PNG ka random file naam (private folder)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 

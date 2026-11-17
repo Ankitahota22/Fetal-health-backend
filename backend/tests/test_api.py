@@ -334,7 +334,7 @@ def test_admin_changes_role(client, make_user):
 # ---------- Member 3 ki real service ka format ----------
 
 def test_predict_accepts_real_ai_service_format(client, patient_with_image, monkeypatch):
-    def real_format(image_bytes, filename, content_type):
+    def real_format(image_bytes, filename, content_type, include_heatmap=False):
         return {
             "predicted_category": "Medium",
             "model_scores": {"Small": 0.2, "Medium": 0.7, "Large": 0.1},
@@ -358,3 +358,102 @@ def test_predict_rejects_unexpected_ai_response(client, patient_with_image, monk
     p = patient_with_image
     r = client.post(f"/assessments/{p['assessment_id']}/predict", headers=p["headers"])
     assert r.status_code == 502
+
+
+# ---------- Heatmap ----------
+
+def _predict(client, p, heatmap):
+    url = f"/assessments/{p['assessment_id']}/predict"
+    if heatmap:
+        url += "?heatmap=true"
+    return client.post(url, headers=p["headers"])
+
+
+def test_predict_without_heatmap_by_default(client, patient_with_image):
+    p = patient_with_image
+    r = _predict(client, p, heatmap=False)
+    assert r.status_code == 201
+    assert r.json()["has_heatmap"] is False
+    assert list(main.UPLOAD_DIR.glob("*_heatmap.png")) == []
+    pred_id = r.json()["id"]
+    assert client.post(f"/predictions/{pred_id}/heatmap/link", headers=p["headers"]).status_code == 404
+
+
+def test_heatmap_saved_privately_and_served_by_link(client, make_user, patient_with_image):
+    p = patient_with_image
+    r = _predict(client, p, heatmap=True)
+    assert r.status_code == 201
+    body = r.json()
+    assert body["has_heatmap"] is True and "heatmap_note" in body
+    assert len(list(main.UPLOAD_DIR.glob("*_heatmap.png"))) == 1
+
+    pred_id = body["id"]
+    link = client.post(f"/predictions/{pred_id}/heatmap/link", headers=p["headers"])
+    assert link.status_code == 200
+    img = client.get(link.json()["url"])  # bina login ke
+    assert img.status_code == 200
+    assert img.headers["content-type"] == "image/png"
+    assert img.content.startswith(b"\x89PNG")
+
+    # list aur detail mein flag dikhta hai
+    mine = client.get("/assessments", headers=p["headers"]).json()[0]
+    assert mine["has_heatmap"] is True and mine["prediction_id"] == pred_id
+    detail = client.get(f"/assessments/{p['assessment_id']}", headers=p["headers"]).json()
+    assert detail["predictions"][0]["has_heatmap"] is True
+
+    # doctor link bana sakta hai, dusra patient nahi
+    doctor = make_user("dr@gmail.com", role="doctor")
+    assert client.post(f"/predictions/{pred_id}/heatmap/link", headers=doctor).status_code == 200
+    other = make_user("sara@gmail.com")
+    assert client.post(f"/predictions/{pred_id}/heatmap/link", headers=other).status_code == 404
+    assert client.post(f"/predictions/{pred_id}/heatmap/link").status_code == 401
+    drow = client.get("/doctor/assessments", headers=doctor).json()[0]
+    assert drow["has_heatmap"] is True
+
+
+def test_heatmap_link_rejects_wrong_tokens(client, patient_with_image):
+    p = patient_with_image
+    pred_id = _predict(client, p, heatmap=True).json()["id"]
+    url = client.post(f"/predictions/{pred_id}/heatmap/link", headers=p["headers"]).json()["url"]
+
+    i = len(url) - 10
+    changed = "A" if url[i] != "A" else "B"
+    assert client.get(url[:i] + changed + url[i + 1:]).status_code == 401
+
+    login_token = p["headers"]["Authorization"].split(" ")[1]
+    assert client.get(f"/heatmap-links/{login_token}").status_code == 401
+
+    image_url = client.post(f"/images/{p['image_id']}/link", headers=p["headers"]).json()["url"]
+    assert client.get("/heatmap-links/" + image_url.split("/")[-1]).status_code == 401
+
+
+def test_bad_heatmap_from_ai_is_ignored(client, patient_with_image, monkeypatch):
+    def bad(image_bytes, filename, content_type, include_heatmap=False):
+        return {
+            "predicted_category": "Small",
+            "model_scores": {"Small": 0.9, "Medium": 0.05, "Large": 0.05},
+            "model_version": "v",
+            "heatmap_base64": "not-valid-base64!!",
+        }
+
+    monkeypatch.setattr(main, "call_ai_service", bad)
+    p = patient_with_image
+    r = _predict(client, p, heatmap=True)
+    assert r.status_code == 201
+    assert r.json()["has_heatmap"] is False
+    assert "heatmap_message" in r.json()
+    assert list(main.UPLOAD_DIR.glob("*_heatmap.png")) == []
+
+
+def test_heatmap_flag_is_forwarded_to_ai_service(client, patient_with_image, monkeypatch):
+    seen = []
+
+    def spy(image_bytes, filename, content_type, include_heatmap=False):
+        seen.append(include_heatmap)
+        return {"predicted_category": "Small", "model_scores": {"Small": 1.0}, "model_version": "v", "heatmap_base64": None}
+
+    monkeypatch.setattr(main, "call_ai_service", spy)
+    p = patient_with_image
+    _predict(client, p, heatmap=False)
+    _predict(client, p, heatmap=True)
+    assert seen == [False, True]
