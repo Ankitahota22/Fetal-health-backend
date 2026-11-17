@@ -329,3 +329,32 @@ def test_admin_changes_role(client, make_user):
     assert client.put(f"/admin/users/{my_id}/role", json={"role": "patient"}, headers=admin).status_code == 400
     assert client.put(f"/admin/users/{uid}/role", json={"role": "boss"}, headers=admin).status_code == 422
     assert client.put("/admin/users/9999/role", json={"role": "doctor"}, headers=admin).status_code == 404
+
+
+# ---------- Member 3 ki real service ka format ----------
+
+def test_predict_accepts_real_ai_service_format(client, patient_with_image, monkeypatch):
+    def real_format(image_bytes, filename, content_type):
+        return {
+            "predicted_category": "Medium",
+            "model_scores": {"Small": 0.2, "Medium": 0.7, "Large": 0.1},
+            "model_version": "hybrid-fetal-hc-v1.0.0",
+            "pixel_size_mm": 0.128,
+            "inference_ms": 41.5,
+            "heatmap_base64": None,
+        }
+
+    monkeypatch.setattr(main, "call_ai_service", real_format)
+    p = patient_with_image
+    r = client.post(f"/assessments/{p['assessment_id']}/predict", headers=p["headers"])
+    assert r.status_code == 201
+    assert r.json()["predicted_class"] == "Medium"
+    assert r.json()["probabilities"]["Medium"] == 0.7
+    assert r.json()["model_version"] == "hybrid-fetal-hc-v1.0.0"
+
+
+def test_predict_rejects_unexpected_ai_response(client, patient_with_image, monkeypatch):
+    monkeypatch.setattr(main, "call_ai_service", lambda *a, **k: {"hello": "world"})
+    p = patient_with_image
+    r = client.post(f"/assessments/{p['assessment_id']}/predict", headers=p["headers"])
+    assert r.status_code == 502

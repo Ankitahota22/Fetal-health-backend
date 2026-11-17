@@ -578,12 +578,18 @@ def run_prediction(
     except httpx.HTTPError:
         raise HTTPException(status_code=503, detail="AI service unavailable")
 
+    # AI service ke dono format chalenge (mock aur Member 3 ki real service)
+    predicted_class = result.get("predicted_class") or result.get("predicted_category")
+    probabilities = result.get("probabilities") or result.get("model_scores")
+    if not predicted_class or not probabilities:
+        raise HTTPException(status_code=502, detail="AI service returned an unexpected response")
+
     # 4. Result save karo
     prediction = models.Prediction(
         assessment_id=assessment.id,
-        predicted_class=result["predicted_class"],
-        probabilities=json.dumps(result["probabilities"]),
-        model_version=result["model_version"],
+        predicted_class=predicted_class,
+        probabilities=json.dumps(probabilities),
+        model_version=result.get("model_version", "unknown"),
     )
     db.add(prediction)
     assessment.status = "completed"
@@ -596,7 +602,7 @@ def run_prediction(
         "id": prediction.id,
         "assessment_id": prediction.assessment_id,
         "predicted_class": prediction.predicted_class,
-        "probabilities": result["probabilities"],
+        "probabilities": probabilities,
         "model_version": prediction.model_version,
         "disclaimer": "Screening support only, not a diagnosis.",
     }
