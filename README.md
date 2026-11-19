@@ -69,6 +69,7 @@ venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn api:app --port 8001
 ```
+Open http://127.0.0.1:8001/docs
 
 It can take up to two minutes to start while the model loads. For quick development without the real model, run `mock_ai_service` instead (see `backend/README.md`).
 
